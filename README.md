@@ -20,6 +20,7 @@ and runs beside it.
 | Generic residual-evidence semantics (`Candidate`, `Case`, `Holds`) | **proved** upstream in [`residual-evidence-types`](https://github.com/hyperpolymath/residual-evidence-types) (MPL-2.0), pinned by commit |
 | Counts model (`agda/src/MetaManifold/Evidence/Counts.agda`) | **proved**, Agda `--safe --without-K`, builtins only, no postulates |
 | Interval ends and verdict behaviour (`agda/src/MetaManifold/Evidence/Bounds.agda`) | **proved**, same flags |
+| Agreement with the generic finite checker (`agda/src/MetaManifold/Evidence/CheckerBridge.agda`) | **proved** on the whole domain the two models share (reads and noise bound 0..6). The checker only exists on −6..6 |
 | Julia verdict code (`count_verdict`, `fibre` in `julia/src/counts.jl`) | **certified on the grid** reads, noise ∈ 0..12 (169 rows): Agda proves `grid 12 ≡ expected` by `refl` against a table this code generates. Outside the grid it is **tested**, not proved. The closed forms it implements are proved for all naturals |
 | Julia server, input contract, receipts, client for the app's query route | **tested** (`julia/test`), against a stub of the route, not yet against a running app |
 | Web UI | **not yet built**. Planned increment E0.4 |
@@ -59,6 +60,27 @@ it by noise `d` in either direction. The evidence is `d ≤ n`.
 
 These hold for all natural numbers. They are not a sampled grid.
 
+### What `CheckerBridge.agda` proves
+
+`residual-evidence-types` has its own certified finite checker
+(`ResidualEvidence.Finite.Checker`, the model behind its explorer). Its
+worlds are integer `(latent, noise)` pairs in −6..6, so it also admits
+*negative* latents. Counts worlds are natural numbers with no upper limit.
+
+The two models share reads `y` ∈ 0..6 and noise bounds `n` ∈ 0..6, under the
+checker's exact view with no assumption on the latent. On every one of those
+49 cells:
+
+- **`presence-agrees`.** The checker's presence verdict equals the counts
+  `verdict y n`. The negative latents it also considers never change it.
+- **`latents-agree`.** The natural latents among the checker's candidates
+  are exactly `[lo, hi]`, cut off at the checker's edge 6.
+
+Both premises are needed. `agda/reject/BridgeOutOfRange` shows that at
+`y = 7, n = 0` the checker has no candidate (`inconsistent`) while counts
+says `entailed`. `agda/reject/BridgeUnclipped` shows the interval `[5, 7]`
+at `y = 6, n = 1` is not what the checker sees.
+
 ### What the grid certificate checks
 
 The Julia code the server runs is not itself proved. To tie it to the proofs,
@@ -87,7 +109,7 @@ The two directions are both guarded:
   It then requires every module in `agda/reject/` to **fail** at its intended
   declaration. These are claims that must not be provable, such as "entailed
   at `y = n`".
-- `mutants.sh` corrupts the model nine ways and requires the proofs to refuse
+- `mutants.sh` corrupts the model eleven ways and requires the proofs to refuse
   each one:
   - an off-by-one threshold;
   - a zero case relabelled as unresolved;
@@ -95,7 +117,8 @@ The two directions are both guarded:
   - an off-by-one lower interval end;
   - monotonicity in the wrong direction;
   - a non-strict entailment threshold in the characterisation;
-  - three corruptions of the Julia table (a verdict, a clamp, a missing row).
+  - three corruptions of the Julia table (a verdict, a clamp, a missing row);
+  - the bridge stated for an assumed-zero latent, or without the cut-off.
 - `julia-mutants.sh` is described above.
 
 CI runs the Agda steps with Debian's `agda 2.6.4.3` inside a digest-pinned
