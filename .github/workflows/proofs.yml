@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell
+name: Agda proofs
+
+# Same recipe as residual-evidence-types: Debian's agda package at an exact
+# version inside a digest-pinned image, dependencies fetched by commit with
+# plain git, and only a GitHub-owned action, pinned by SHA.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proofs:
+    name: Counts proofs, expected rejections and mutants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container: debian:13-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+    steps:
+      - name: Install authenticated Debian toolchain packages
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y ca-certificates git agda-bin=2.6.4.3-1+b2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Verify the checked Agda version
+        run: test "$(agda --version)" = 'Agda version 2.6.4.3'
+      - name: Fetch residual-evidence-types by commit
+        run: bash scripts/fetch-layer-a.sh
+      - name: Counts proofs, axiom audit and expected rejections
+        run: bash scripts/check.sh
+      - name: Gate self-test (every mutant must be refused)
+        run: bash scripts/mutants.sh
