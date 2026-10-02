@@ -18,6 +18,7 @@ and runs beside it.
 |---|---|
 | Generic residual-evidence semantics (`Candidate`, `Case`, `Holds`) | **proved** upstream in [`residual-evidence-types`](https://github.com/hyperpolymath/residual-evidence-types) (MPL-2.0), pinned by commit |
 | Counts model (`agda/src/MetaManifold/Evidence/Counts.agda`) | **proved**, Agda `--safe --without-K`, builtins only, no postulates |
+| Interval ends and verdict behaviour (`agda/src/MetaManifold/Evidence/Bounds.agda`) | **proved**, same flags |
 | Julia routes, web UI | **not yet built**. Planned increments E0.3 and E0.4 |
 | End-to-end run on MiSeq_SOP | **not yet done**. Planned increment E0.5 |
 
@@ -38,6 +39,23 @@ it by noise `d` in either direction. The evidence is `d ≤ n`.
   - `refuted` when `y = n = 0`: every candidate is absent;
   - `unresolved` otherwise: there is a witness each way.
 
+### What `Bounds.agda` proves
+
+- **`fibre⇒bounds` / `bounds⇒fibre`.** With `lo y n = y ∸ n` and
+  `hi y n = y + n` as functions, the fibre is exactly the latents in
+  `[lo, hi]`. The two numbers a client shows are proved, not just computed.
+- **`view`.** The verdict is characterised completely:
+  - `entailed` ⇔ `n < y`;
+  - `refuted` ⇔ `y = n = 0`;
+  - `unresolved` ⇔ `y ≤ n` and `n ≥ 1`.
+- **More noise never strengthens a verdict.**
+  - `entailed-anti`: an entailment survives a lower bound.
+  - `unresolved-mono`: an unresolved verdict survives a higher bound.
+  - `refuted-only-at-zero` / `refuted-fragile`: refuted occurs only at
+    `y = n = 0`, and any positive bound turns it into unresolved.
+
+These hold for all natural numbers. They are not a sampled grid.
+
 ### How the proofs are checked
 
 `bash scripts/fetch-layer-a.sh && bash scripts/check.sh && bash scripts/mutants.sh`
@@ -46,11 +64,14 @@ it by noise `d` in either direction. The evidence is `d ≤ n`.
   It then requires every module in `agda/reject/` to **fail** at its intended
   declaration. These are claims that must not be provable, such as "entailed
   at `y = n`".
-- `mutants.sh` corrupts the verdict three ways and requires the proofs to
-  refuse each one:
+- `mutants.sh` corrupts the model six ways and requires the proofs to refuse
+  each one:
   - an off-by-one threshold;
   - a zero case relabelled as unresolved;
-  - a one-sided noise model.
+  - a one-sided noise model;
+  - an off-by-one lower interval end;
+  - monotonicity in the wrong direction;
+  - a non-strict entailment threshold in the characterisation.
 
 CI runs all three steps with Debian's `agda 2.6.4.3` inside a digest-pinned
 image.

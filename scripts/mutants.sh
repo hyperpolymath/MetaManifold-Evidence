@@ -10,14 +10,15 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 prover="${AGDA:-agda}"
 ret_src="$(realpath "${RET_SRC:-_build/dependencies/residual-evidence-types/src}")"
-target=MetaManifold/Evidence/Counts.agda
+counts=MetaManifold/Evidence/Counts.agda
+bounds=MetaManifold/Evidence/Bounds.agda
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Apply one sed expression to a copy of the module and require that the copy
-# differs from the original and fails to type-check.
+# Apply one sed expression to a copy of the target module and require that
+# the copy differs from the original and fails to type-check.
 kill_mutant() {
-  local label=$1 expr=$2 dir
+  local target=$1 label=$2 expr=$3 dir
   dir="$work/$label"
   mkdir -p "$dir"
   cp -r agda/src/. "$dir/"
@@ -40,9 +41,15 @@ kill_mutant() {
 }
 
 # Off-by-one in the entailment threshold.
-kill_mutant threshold 's/^verdict y n with n < y$/verdict y n with n < suc y/; s/^verdict-sound y n with n < y in eq$/verdict-sound y n with n < suc y in eq/'
+kill_mutant "$counts" threshold 's/^verdict y n with n < y$/verdict y n with n < suc y/; s/^verdict-sound y n with n < y in eq$/verdict-sound y n with n < suc y in eq/'
 # Zero reads with zero noise reported as unresolved.
-kill_mutant zero-case '0,/^\.\.\.     | zero  = refuted$/s//...     | zero  = unresolved/'
+kill_mutant "$counts" zero-case '0,/^\.\.\.     | zero  = refuted$/s//...     | zero  = unresolved/'
 # Noise counted on one side only: under-counting worlds removed from the model.
-kill_mutant one-sided 's/^observed (world b d under) = b$/observed (world b d under) = b + d/'
+kill_mutant "$counts" one-sided 's/^observed (world b d under) = b$/observed (world b d under) = b + d/'
+# The lower interval end shifted by one read.
+kill_mutant "$bounds" lo-off-by-one 's/^lo y n = y - n$/lo y n = y - suc n/'
+# Monotonicity claimed in the wrong direction.
+kill_mutant "$bounds" mono-direction 's/^unresolved-mono : ∀ {y n n'"'"'} → n ≤ n'"'"' /unresolved-mono : ∀ {y n n'"'"'} → n'"'"' ≤ n /'
+# Entailment characterised with a non-strict threshold.
+kill_mutant "$bounds" view-threshold 's/^  v-entailed   : suc n ≤ y /  v-entailed   : n ≤ y /'
 echo 'PASS: all mutants killed'
