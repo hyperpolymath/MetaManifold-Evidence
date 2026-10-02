@@ -8,9 +8,10 @@ It answers one question per taxon and sample: *given these read counts and
 this noise bound, is the taxon present, absent, or undecided?* The answer is
 returned with the proof-backed reason, not a score.
 
-This package does **not** import or modify MetaManifold. It reads what the app
-already exposes (the results table query route, or an exported counts table)
-and runs beside it.
+This package does **not** import or modify MetaManifold. The planned Julia
+layer (E0.3) will read only what the app already exposes (an exported counts
+table, or the results query route) and run beside it. Today the package holds
+the proved model only.
 
 ## Status (honest labels)
 
