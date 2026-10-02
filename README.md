@@ -139,5 +139,5 @@ places to change.
 ## Licence
 
 AGPL-3.0-or-later, matching MetaManifold. The generic libraries it depends on
-(`residual-evidence-types`, and later `ResidualEvidenceTypes.jl`) stay
-MPL-2.0. They are used, never copied.
+(`residual-evidence-types` for the proofs, `ResidualEvidenceTypes.jl` for the
+server) stay MPL-2.0. They are used, never copied.
