@@ -5,3 +5,4 @@
 module MetaManifold.Evidence.All where
 
 import MetaManifold.Evidence.Counts
+import MetaManifold.Evidence.Bounds
