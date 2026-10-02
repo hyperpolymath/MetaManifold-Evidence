@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell
-name: Agda proofs
+name: Proofs and tests
 
 # Same recipe as residual-evidence-types: Debian's agda package at an exact
 # version inside a digest-pinned image, dependencies fetched by commit with
@@ -45,3 +45,31 @@ jobs:
         run: bash scripts/check.sh
       - name: Gate self-test (every mutant must be refused)
         run: bash scripts/mutants.sh
+
+  julia:
+    # The official tarball, checked against the sha256 julialang publishes,
+    # instead of a third-party setup action.
+    name: Julia tests and grid certificate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      JULIA_VERSION: 1.12.6
+      JULIA_SHA256: bbabf3bef19421a9dbd24a767d807606ab85e444323b5a1c73ffe293fa3d079a
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install checksum-verified Julia
+        run: |
+          curl -fsSLo julia.tar.gz "https://julialang-s3.julialang.org/bin/linux/x64/1.12/julia-${JULIA_VERSION}-linux-x86_64.tar.gz"
+          echo "${JULIA_SHA256}  julia.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/julia"
+          tar -xzf julia.tar.gz -C "$RUNNER_TEMP/julia" --strip-components=1
+          rm julia.tar.gz
+          echo "$RUNNER_TEMP/julia/bin" >> "$GITHUB_PATH"
+      - name: Verify the Julia version
+        run: test "$(julia --version)" = "julia version ${JULIA_VERSION}"
+      - name: Package tests
+        run: julia --project=julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+      - name: Grid certificate gate self-test (table current, every mutant must change it)
+        run: bash scripts/julia-mutants.sh

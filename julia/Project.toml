@@ -1,0 +1,28 @@
+name = "MetaManifoldEvidence"
+uuid = "cd1ff00d-285c-45d4-a81e-5ce83fc9e9a8"
+license = "AGPL-3.0-or-later"
+version = "0.2.0"
+authors = ["Jonathan D.A. Jewell <j.d.a.jewell@open.ac.uk>"]
+
+[deps]
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+ResidualEvidenceTypes = "991b2426-ef47-5ab5-88bd-507ff6599371"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+
+[sources]
+ResidualEvidenceTypes = {url = "https://github.com/hyperpolymath/ResidualEvidenceTypes.jl", rev = "abe97d5c99eee6b5f9ff6ae56a9a98b872312be1"}
+
+[compat]
+HTTP = "1.11"
+JSON3 = "1.14"
+ResidualEvidenceTypes = "0.1"
+SHA = "0.7"
+Test = "1.11"
+julia = "1.11"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

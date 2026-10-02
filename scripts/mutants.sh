@@ -12,13 +12,16 @@ prover="${AGDA:-agda}"
 ret_src="$(realpath "${RET_SRC:-_build/dependencies/residual-evidence-types/src}")"
 counts=MetaManifold/Evidence/Counts.agda
 bounds=MetaManifold/Evidence/Bounds.agda
+table=MetaManifold/Evidence/CountsJuliaTable.agda
+cert=MetaManifold/Evidence/CountsCertificate.agda
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # Apply one sed expression to a copy of the target module and require that
-# the copy differs from the original and fails to type-check.
+# the copy differs from the original and that the checked module (the target
+# itself unless a fourth argument names another) fails to type-check.
 kill_mutant() {
-  local target=$1 label=$2 expr=$3 dir
+  local target=$1 label=$2 expr=$3 check=${4:-$1} dir
   dir="$work/$label"
   mkdir -p "$dir"
   cp -r agda/src/. "$dir/"
@@ -28,7 +31,7 @@ kill_mutant() {
     exit 1
   fi
   if "$prover" --safe --without-K --no-libraries --ignore-interfaces \
-       -i "$dir" -i "$ret_src" "$dir/$target" >"$dir.log" 2>&1; then
+       -i "$dir" -i "$ret_src" "$dir/$check" >"$dir.log" 2>&1; then
     echo "ERROR: mutant survived: $label" >&2
     exit 1
   fi
@@ -52,4 +55,10 @@ kill_mutant "$bounds" lo-off-by-one 's/^lo y n = y - n$/lo y n = y - suc n/'
 kill_mutant "$bounds" mono-direction 's/^unresolved-mono : ∀ {y n n'"'"'} → n ≤ n'"'"' /unresolved-mono : ∀ {y n n'"'"'} → n'"'"' ≤ n /'
 # Entailment characterised with a non-strict threshold.
 kill_mutant "$bounds" view-threshold 's/^  v-entailed   : suc n ≤ y /  v-entailed   : n ≤ y /'
+# The Julia table disagrees with the proved verdict in one row.
+kill_mutant "$table" table-verdict "s/^  row 12 12 unresolved 0 24 ∷\$/  row 12 12 entailed 0 24 ∷/" "$cert"
+# The Julia table loses the zero clamp on a lower end.
+kill_mutant "$table" table-clamp "s/^  row 3 5 unresolved 0 8 ∷\$/  row 3 5 unresolved 1 8 ∷/" "$cert"
+# The Julia table drops a row.
+kill_mutant "$table" table-missing-row "/^  row 7 7 unresolved 0 14 ∷\$/d" "$cert"
 echo 'PASS: all mutants killed'
