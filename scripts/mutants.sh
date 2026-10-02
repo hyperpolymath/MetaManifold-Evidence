@@ -14,6 +14,7 @@ counts=MetaManifold/Evidence/Counts.agda
 bounds=MetaManifold/Evidence/Bounds.agda
 table=MetaManifold/Evidence/CountsJuliaTable.agda
 cert=MetaManifold/Evidence/CountsCertificate.agda
+bridge=MetaManifold/Evidence/CheckerBridge.agda
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -61,4 +62,8 @@ kill_mutant "$table" table-verdict "s/^  row 12 12 unresolved 0 24 ∷\$/  row 1
 kill_mutant "$table" table-clamp "s/^  row 3 5 unresolved 0 8 ∷\$/  row 3 5 unresolved 1 8 ∷/" "$cert"
 # The Julia table drops a row.
 kill_mutant "$table" table-missing-row "/^  row 7 7 unresolved 0 14 ∷\$/d" "$cert"
+# The bridge under an assumed-zero latent instead of no assumption.
+kill_mutant "$bridge" bridge-assume-zero 's/^asConfig y n = config (pos y) n exact false$/asConfig y n = config (pos y) n exact true/'
+# The bridge without the cut-off at the checker's edge.
+kill_mutant "$bridge" bridge-unclipped 's/^LatentsAgree y n = checkerLatents y n ≡ span (lo y n) (min (hi y n) 6)$/LatentsAgree y n = checkerLatents y n ≡ span (lo y n) (hi y n)/'
 echo 'PASS: all mutants killed'
