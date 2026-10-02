@@ -6,7 +6,7 @@ const MODEL = "counts-interval-v1"
 
 "The proved artefacts the verdicts rest on, by tag and commit."
 const PROOF_PINS = (
-    metamanifold_evidence = "v0.1.0 (ce8fd5ea54bd2d5e858cbf1eea9661cb4824b74e)",
+    metamanifold_evidence = "v0.1.1 (f155885dd6d2c55e32796a74f48391d266ef27f0)",
     residual_evidence_types = "62d749075425ec32a5aa150d8bc64bf05a7e542f",
 )
 

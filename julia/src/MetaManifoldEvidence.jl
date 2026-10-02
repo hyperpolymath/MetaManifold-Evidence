@@ -19,12 +19,14 @@ using ResidualEvidenceTypes: Case, Verdict, ENTAILED, REFUTED, UNRESOLVED, INCON
 export CountWorld, latent, observed, count_case, fibre, count_verdict,
        CountsTable, read_tsv, table_from_rows, evaluate, as_count,
        receipt, verify_receipt, canonical_tsv, verdict_name, MODEL, PROOF_PINS,
-       fetch_counts, router, serve, DEFAULT_PORT
+       fetch_counts, router, serve, DEFAULT_PORT,
+       CERTIFICATE_BOUND, certificate_rows, certificate_agda
 
 include("counts.jl")
 include("table.jl")
 include("receipt.jl")
 include("client.jl")
 include("server.jl")
+include("certificate.jl")
 
 end

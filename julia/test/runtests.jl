@@ -166,4 +166,21 @@ end
     end
 end
 
+
+@testset "grid certificate" begin
+    rows = certificate_rows()
+    @test length(rows) == 169                   # 13 × 13
+    v = [r[3] for r in rows]
+    @test count(==(ENTAILED), v) == 78           # pairs with n < y
+    @test count(==(REFUTED), v) == 1            # y = n = 0
+    @test count(==(UNRESOLVED), v) == 90
+    @test count(==(INCONSISTENT), v) == 0
+    # Rows where the lower end clamps at zero (n > y), where max and monus could differ.
+    @test count(r -> r[2] > r[1], rows) == 78
+    @test all(r -> r[4] == 0, filter(r -> r[2] > r[1], rows))
+    # The committed Agda table is exactly what this code renders now.
+    committed = joinpath(@__DIR__, "..", "..", "agda", "src", "MetaManifold", "Evidence", "CountsJuliaTable.agda")
+    @test read(committed, String) == certificate_agda()
+end
+
 end
