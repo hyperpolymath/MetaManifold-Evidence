@@ -13,11 +13,24 @@ import pathlib
 import re
 import sys
 
+def _tools_dir():
+    """Where clr_model.py and fixture.py live: $METAMANIFOLD_TOOLS, this package's
+    ../tools, or the sandbox default. The harness and the model have to be run
+    from the same checkout, or the comparison means nothing."""
+    env = os.environ.get("METAMANIFOLD_TOOLS")
+    if env:
+        return pathlib.Path(env)
+    here = pathlib.Path(__file__).resolve().parent
+    for cand in (here.parent / "tools", pathlib.Path("/home/user/tools")):
+        if (cand / "clr_model.py").is_file():
+            return cand
+    raise SystemExit("cannot find clr_model.py; set METAMANIFOLD_TOOLS")
+
 REPO = pathlib.Path(os.environ.get("METAMANIFOLD_WEBUI", "/home/user/MetaManifold-WebUI"))
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "generated"
 
-sys.path.insert(0, "/home/user/tools")
+sys.path.insert(0, str(_tools_dir()))
 import clr_model as M  # noqa: E402
 import fixture as F     # noqa: E402
 
@@ -101,9 +114,10 @@ def main():
                  "  rc_num(\"repl.%s.rest\", 1 - rowSums(da_zr_out))\n"
                  "  rc_num(\"repl.%s.minobs\", min(da_zr_out[x > 0]))\n"
                  "  rc_chr(\"repl.%s.positive\", ifelse(all(da_zr_out[x > 0] > 0), \"yes\", \"no\"))\n"
+                 "  rc_num(\"repl.%s.dim\", dim(da_zr_out))\n"
                  "}\n"
                  % (name, rmat(x, "x"), REPLACE % (delta, 0.5), rep, "\n",
-                    *(name,) * 6))
+                    *(name,) * 7))
     for tag, x, delta, thr in (("zero_free", ZEROFREE, 0.65, 0.5),
                                ("negative", NEGATIVE, 0.65, 0.5),
                                ("one_row", ONE_ROW, 0.65, 0.5)):
@@ -133,12 +147,13 @@ def main():
                  "rc_chr(\"chain.%s.note\", da_result$note)\n"
                  "rc_num(\"chain.%s.clr\", as.vector(t(z)))\n"
                  "rc_num(\"chain.%s.mass\", rowSums(ifelse(x == 0, da_zr_out, 0)))\n"
+                 "rc_chr(\"chain.%s.columns\", names(da_result))\n"
                  "rc_num(\"chain.%s.bh\", stats::p.adjust(da_result$pvalue, method = \"BH\"))\n"
                  "rc_num(\"chain.%s.pooled\", vapply(seq_len(ncol(z)), function(j) "
                  "stats::t.test(z[group == \"B\", j], z[group == \"A\", j], "
                  "var.equal = TRUE)$p.value, numeric(1)))\n"
                  % (name, rmat(x, "x"), step, rvec(groups), "", welch,
-                    *(name,) * 11))
+                    *(name,) * 12))
     for name, x, groups in (("degen", DEGEN, ["A", "A", "B", "B"]),
                             ("const", CONSTANT, ["A", "A", "B", "B"]),
                             ("single", SINGLE, ["A", "A", "B"])):
@@ -151,6 +166,17 @@ def main():
                  "rc_num(\"fit.%s.pvalue\", da_result$pvalue)\n"
                  "rc_num(\"fit.%s.df\", da_result$df)\n"
                  % (rmat(x, "x"), rvec(groups), welch, *(name,) * 5))
+    # webR has no MASS, so the negative-binomial path cannot be run here; it
+    # is checked as text instead, which is what catches a broken or renamed
+    # snippet in the shipped source.
+    nb = body("src/analysis/differential.jl", "_FIT_R")
+    (OUT / "fit_nb_body.R").write_text(nb)
+    if "]-" in nb:
+        raise SystemExit("the R raw-string delimiter appears in _FIT_R")
+    lit = 'R"-[' + nb + ']-"'
+    h.append("\n# --- the negative-binomial snippet has to stay parseable R ---\n"
+             'rc_chr("nb_body.parse", tryCatch({parse(text = ' + lit + '); "ok"}, '
+             'error = function(e) conditionMessage(e)))\n')
     (OUT / "harness.R").write_text("".join(h) + "\nrc_lines\n")
     for f in ("replace_body.R", "welch_body.R", "harness.R"):
         t = (OUT / f).read_text()

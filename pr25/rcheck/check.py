@@ -16,9 +16,22 @@ import re
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+def _tools_dir():
+    """Where clr_model.py and fixture.py live: $METAMANIFOLD_TOOLS, this package's
+    ../tools, or the sandbox default. The harness and the model have to be run
+    from the same checkout, or the comparison means nothing."""
+    env = os.environ.get("METAMANIFOLD_TOOLS")
+    if env:
+        return pathlib.Path(env)
+    here = pathlib.Path(__file__).resolve().parent
+    for cand in (here.parent / "tools", pathlib.Path("/home/user/tools")):
+        if (cand / "clr_model.py").is_file():
+            return cand
+    raise SystemExit("cannot find clr_model.py; set METAMANIFOLD_TOOLS")
+
 REPO = pathlib.Path(os.environ.get("METAMANIFOLD_WEBUI", "/home/user/MetaManifold-WebUI"))
 
-sys.path.insert(0, "/home/user/tools")
+sys.path.insert(0, str(_tools_dir()))
 import clr_model as M  # noqa: E402
 import fixture as F    # noqa: E402
 
@@ -121,6 +134,8 @@ def main():
         check("repl.%s.positive" % name, "str", "yes" if all(v > 0 for v in obs) else "no",
               _val(r, "repl.%s.positive" % name))
         check("repl.%s.error" % name, "str", "none", _val(r, "repl.%s.error" % name))
+        check("repl.%s.dim" % name, "num", [len(x), len(x[0])],
+              _val(r, "repl.%s.dim" % name))
     check("repl.six_kept.error", "str", ZERO_FREE_MSG, _val(r, "repl.six_kept.error"))
     check("msg.zero_free", "str", ZERO_FREE_MSG, _val(r, "msg.zero_free"))
     check("msg.negative", "str", NEGATIVE_MSG, _val(r, "msg.negative"))
@@ -146,6 +161,9 @@ def main():
         check("chain.%s.bh" % name, "num", M.bh_adjust(p), _val(r, "chain.%s.bh" % name), tol=1e-9)
         check("chain.%s.status" % name, "str", ["ok"] * len(p), _val(r, "chain.%s.status" % name))
         check("chain.%s.note" % name, "str", [""] * len(p), _val(r, "chain.%s.note" % name))
+        check("chain.%s.columns" % name, "str",
+              ["status", "note", "estimate", "se", "statistic", "pvalue", "df"],
+              _val(r, "chain.%s.columns" % name))
         if name == "sparse_kept":
             z = M.clr(res["closed"])
             mass = res["mass"]
@@ -188,6 +206,10 @@ def main():
     if "not enough 'x' observations" not in _txt(r, "fit.single.note"):
         failures.append("fit.single.note: R's own t.test error is not in %r"
                         % _txt(r, "fit.single.note"))
+
+    check("nb_body.parse", "str", "ok", _val(r, "nb_body.parse"))
+    if "MASS::glm.nb" not in (HERE / "generated" / "fit_nb_body.R").read_text():
+        failures.append("generated/fit_nb_body.R is not the negative-binomial snippet")
 
     literals(r)
 
@@ -255,13 +277,14 @@ if __name__ == "__main__":
                          ("sparse_kept", SPARSE_KEPT, 0.65), ("sparse_all", SPARSE_ALL, 0.65),
                          ("hand_shallow", HAND, 0.05), ("hand_deep", HAND, 0.99)):
         EXPECTED |= {"repl.%s.%s" % (name, k) for k in
-                     ("out", "mass", "rest", "minobs", "positive", "error")}
+                     ("out", "mass", "rest", "minobs", "positive", "error", "dim")}
     EXPECTED.add("repl.six_kept.error")
+    EXPECTED.add("nb_body.parse")
     EXPECTED |= {"msg.zero_free", "msg.negative", "msg.one_row"}
     for name in ("sparse_kept", "six_kept", "six_all", "effect"):
         EXPECTED |= {"chain.%s.%s" % (name, k) for k in
                      ("estimate", "se", "statistic", "pvalue", "df", "bh", "status",
-                      "note", "clr", "mass", "pooled")}
+                      "note", "clr", "mass", "pooled", "columns")}
     EXPECTED |= {"fit.degen.status", "fit.degen.note", "fit.const.status", "fit.const.note",
                  "fit.single.status", "fit.single.note"}
     for f in ("degen", "const", "single"):

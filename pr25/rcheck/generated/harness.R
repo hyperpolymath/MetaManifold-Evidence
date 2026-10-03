@@ -31,6 +31,7 @@ if (is.na(rc_err)) {
   rc_num("repl.hand.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.hand.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.hand.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.hand.dim", dim(da_zr_out))
 }
 
 # --- replacement: onezero ---
@@ -52,6 +53,7 @@ if (is.na(rc_err)) {
   rc_num("repl.onezero.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.onezero.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.onezero.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.onezero.dim", dim(da_zr_out))
 }
 
 # --- replacement: sparse_kept ---
@@ -73,6 +75,7 @@ if (is.na(rc_err)) {
   rc_num("repl.sparse_kept.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.sparse_kept.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.sparse_kept.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.sparse_kept.dim", dim(da_zr_out))
 }
 
 # --- replacement: sparse_all ---
@@ -94,6 +97,7 @@ if (is.na(rc_err)) {
   rc_num("repl.sparse_all.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.sparse_all.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.sparse_all.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.sparse_all.dim", dim(da_zr_out))
 }
 
 # --- replacement: six_kept ---
@@ -115,6 +119,7 @@ if (is.na(rc_err)) {
   rc_num("repl.six_kept.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.six_kept.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.six_kept.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.six_kept.dim", dim(da_zr_out))
 }
 
 # --- replacement: hand_shallow ---
@@ -136,6 +141,7 @@ if (is.na(rc_err)) {
   rc_num("repl.hand_shallow.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.hand_shallow.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.hand_shallow.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.hand_shallow.dim", dim(da_zr_out))
 }
 
 # --- replacement: hand_deep ---
@@ -157,6 +163,7 @@ if (is.na(rc_err)) {
   rc_num("repl.hand_deep.rest", 1 - rowSums(da_zr_out))
   rc_num("repl.hand_deep.minobs", min(da_zr_out[x > 0]))
   rc_chr("repl.hand_deep.positive", ifelse(all(da_zr_out[x > 0] > 0), "yes", "no"))
+  rc_num("repl.hand_deep.dim", dim(da_zr_out))
 }
 
 # --- the message R gives for zero_free ---
@@ -283,6 +290,7 @@ rc_chr("chain.sparse_kept.status", da_result$status)
 rc_chr("chain.sparse_kept.note", da_result$note)
 rc_num("chain.sparse_kept.clr", as.vector(t(z)))
 rc_num("chain.sparse_kept.mass", rowSums(ifelse(x == 0, da_zr_out, 0)))
+rc_chr("chain.sparse_kept.columns", names(da_result))
 rc_num("chain.sparse_kept.bh", stats::p.adjust(da_result$pvalue, method = "BH"))
 rc_num("chain.sparse_kept.pooled", vapply(seq_len(ncol(z)), function(j) stats::t.test(z[group == "B", j], z[group == "A", j], var.equal = TRUE)$p.value, numeric(1)))
 
@@ -371,6 +379,7 @@ rc_chr("chain.six_kept.status", da_result$status)
 rc_chr("chain.six_kept.note", da_result$note)
 rc_num("chain.six_kept.clr", as.vector(t(z)))
 rc_num("chain.six_kept.mass", rowSums(ifelse(x == 0, da_zr_out, 0)))
+rc_chr("chain.six_kept.columns", names(da_result))
 rc_num("chain.six_kept.bh", stats::p.adjust(da_result$pvalue, method = "BH"))
 rc_num("chain.six_kept.pooled", vapply(seq_len(ncol(z)), function(j) stats::t.test(z[group == "B", j], z[group == "A", j], var.equal = TRUE)$p.value, numeric(1)))
 
@@ -459,6 +468,7 @@ rc_chr("chain.six_all.status", da_result$status)
 rc_chr("chain.six_all.note", da_result$note)
 rc_num("chain.six_all.clr", as.vector(t(z)))
 rc_num("chain.six_all.mass", rowSums(ifelse(x == 0, da_zr_out, 0)))
+rc_chr("chain.six_all.columns", names(da_result))
 rc_num("chain.six_all.bh", stats::p.adjust(da_result$pvalue, method = "BH"))
 rc_num("chain.six_all.pooled", vapply(seq_len(ncol(z)), function(j) stats::t.test(z[group == "B", j], z[group == "A", j], var.equal = TRUE)$p.value, numeric(1)))
 
@@ -547,6 +557,7 @@ rc_chr("chain.effect.status", da_result$status)
 rc_chr("chain.effect.note", da_result$note)
 rc_num("chain.effect.clr", as.vector(t(z)))
 rc_num("chain.effect.mass", rowSums(ifelse(x == 0, da_zr_out, 0)))
+rc_chr("chain.effect.columns", names(da_result))
 rc_num("chain.effect.bh", stats::p.adjust(da_result$pvalue, method = "BH"))
 rc_num("chain.effect.pooled", vapply(seq_len(ncol(z)), function(j) stats::t.test(z[group == "B", j], z[group == "A", j], var.equal = TRUE)$p.value, numeric(1)))
 
@@ -753,5 +764,69 @@ rc_chr("fit.single.note", da_result$note)
 rc_num("fit.single.estimate", da_result$estimate)
 rc_num("fit.single.pvalue", da_result$pvalue)
 rc_num("fit.single.df", da_result$df)
+
+# --- the negative-binomial snippet has to stay parseable R ---
+rc_chr("nb_body.parse", tryCatch({parse(text = R"-[da_g <- factor(da_group, levels = da_levels)
+da_term <- paste0("da_g", da_levels[2])
+da_n <- ncol(da_counts)
+da_result <- data.frame(status = rep("ok", da_n), note = rep("", da_n),
+                        estimate = rep(NA_real_, da_n), se = rep(NA_real_, da_n),
+                        statistic = rep(NA_real_, da_n), pvalue = rep(NA_real_, da_n),
+                        theta = rep(NA_real_, da_n), stringsAsFactors = FALSE)
+for (da_j in seq_len(da_n)) {
+  da_y <- da_counts[, da_j]
+  if (length(unique(da_y)) < 2L) {
+    da_result[da_j, "status"] <- "failed"
+    da_result[da_j, "note"] <- "the counts are constant across samples: there is nothing to estimate"
+    next
+  }
+  da_warns <- character(0)
+  da_fit <- tryCatch(
+    withCallingHandlers(
+      MASS::glm.nb(da_y ~ da_g + offset(da_offset), control = glm.control(maxit = 100)),
+      warning = function(w) {
+        da_warns <<- c(da_warns, conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }),
+    error = function(e) e)
+  if (inherits(da_fit, "error")) {
+    da_result[da_j, "status"] <- "failed"
+    da_result[da_j, "note"] <- paste("glm.nb stopped with an error:", conditionMessage(da_fit))
+    next
+  }
+  da_warns <- unique(da_warns)
+  if (!isTRUE(da_fit[["converged"]]) || !is.null(da_fit[["th.warn"]]) ||
+      any(grepl("iteration limit|alternation limit|did not converge|NaNs produced", da_warns))) {
+    da_result[da_j, "status"] <- "failed"
+    da_result[da_j, "note"] <- paste("the fit did not converge:",
+                                     paste(c(da_fit[["th.warn"]], da_warns), collapse = "; "))
+    next
+  }
+  da_co <- summary(da_fit)[["coefficients"]]
+  if (!(da_term %in% rownames(da_co))) {
+    da_result[da_j, "status"] <- "failed"
+    da_result[da_j, "note"] <- "the group coefficient is not estimable (aliased)"
+    next
+  }
+  da_row <- da_co[da_term, ]
+  if (!all(is.finite(da_row)) || da_row[[4]] < 0 || da_row[[4]] > 1) {
+    da_result[da_j, "status"] <- "failed"
+    da_result[da_j, "note"] <- "the fit returned a non-finite estimate, standard error or p-value"
+    next
+  }
+  da_theta <- da_fit[["theta"]]
+  da_result[da_j, c("estimate", "se", "statistic", "pvalue")] <- unname(da_row[1:4])
+  da_result[da_j, "theta"] <- da_theta
+  if (!is.finite(da_theta) || da_theta >= da_theta_upper) {
+    da_result[da_j, "status"] <- "boundary"
+    da_result[da_j, "note"] <- "the dispersion parameter theta reached its upper bound: these counts show no overdispersion, so the fit is effectively Poisson"
+  } else if (da_theta <= da_theta_lower) {
+    da_result[da_j, "status"] <- "boundary"
+    da_result[da_j, "note"] <- "the dispersion parameter theta reached its lower bound: the variance is extreme relative to the mean"
+  } else if (length(da_warns) > 0L) {
+    da_result[da_j, "note"] <- paste("R warned:", paste(da_warns, collapse = "; "))
+  }
+}
+]-"); "ok"}, error = function(e) conditionMessage(e)))
 
 rc_lines

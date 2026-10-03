@@ -1,8 +1,9 @@
 # Draft reply for MetaManifold-WebUI#25
 
-Not posted: the commit is prepared but this sandbox cannot push to the fork
-(`git push` returns 403 for `hyperpolymath/MetaManifold-WebUI`, although
-`gh api` reports `push: true` — the token is scoped to the Arena repository).
+Not posted: the commit is prepared but this sandbox cannot push to the fork.
+`git push` returns 403 and the REST equivalent returns `Resource not accessible
+by integration` — the credential is an App installation token scoped to the Arena
+repository, so no route writes to `hyperpolymath/MetaManifold-WebUI`.
 Apply `0001-*.patch` first, then paste the body below. The evidence it cites is
 already pushed: `pr25/` in `MetaManifold-Evidence` at
 `27ae7ba830b6f3946095a2e648205345d93a33be`, on branch
@@ -103,9 +104,10 @@ matches every estimate, p-value and df against a direct `t.test` call.
 in (no host `libR.so`, so RCall cannot start), so I checked the statistics a
 different way: an independent Python re-implementation of the chain, plus a webR
 harness that extracts the two R strings *from the shipped Julia sources* and runs
-them in real R 4.6.0 with the pinned package's own `cmultRepl.R` — 99 tagged
+them in real R 4.6.0 with the pinned package's own `cmultRepl.R` — 110 tagged
 comparisons, all matching, and a gate that fails if any long literal in either
-test file is not a number R printed. Everything, including `frontend`
+test file is not a number R printed, if the replacement returns a table of the
+wrong shape, or if the fit's columns are renamed. Everything, including `frontend`
 (`bun test src`: 33 pass; `bun run typecheck`: clean) is described in
 `MetaManifold-Evidence/pr25/README.md` at `27ae7ba830b6f3946095a2e648205345d93a33be`,
 which also carries the patch. What I could not run is the Julia test suite itself; that is CI's.
