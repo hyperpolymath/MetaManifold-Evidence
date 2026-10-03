@@ -7,8 +7,12 @@ this is where the work survives.
 
 ## The commit
 
-`0001-Test-each-CLR-difference-with-Welch-s-t-test-and-fil.patch` applies to
-`feat/differential-clr` at `1ee3e71` (checked with `git apply --check`):
+`0001-Test-each-CLR-difference-with-Welch-s-t-test-and-fil.patch` is
+`c5ba8c75bc4bcfb34861cc87f39ceba2dde01284`, made in a local clone of the fork and
+not yet on the PR branch: the sandbox token cannot push to
+`hyperpolymath/MetaManifold-WebUI` (403 on push, though `gh api` reports
+`push: true`). The patch applies to `feat/differential-clr` at `1ee3e71`, checked
+with `git apply --check`:
 
 ```sh
 git clone git@github.com:hyperpolymath/MetaManifold-WebUI.git
