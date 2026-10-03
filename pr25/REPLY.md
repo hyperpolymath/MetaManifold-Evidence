@@ -4,8 +4,10 @@ Not posted: the commit is prepared but this sandbox cannot push to the fork
 (`git push` returns 403 for `hyperpolymath/MetaManifold-WebUI`, although
 `gh api` reports `push: true` — the token is scoped to the Arena repository).
 Apply `0001-*.patch` first, then paste the body below. The evidence it cites is
-already pushed: `pr25/` in `MetaManifold-Evidence`, branch
-`arena/01a10031-metamanifold-evidence`, commit the tip of branch `arena/01a10031-metamanifold-evidence`.
+already pushed: `pr25/` in `MetaManifold-Evidence` at
+`27ae7ba830b6f3946095a2e648205345d93a33be`, on branch
+`arena/01a10031-metamanifold-evidence`; the patch reproduces the commit
+`c5ba8c75bc4bcfb34861cc87f39ceba2dde01284`.
 
 ---
 
@@ -105,8 +107,8 @@ them in real R 4.6.0 with the pinned package's own `cmultRepl.R` — 99 tagged
 comparisons, all matching, and a gate that fails if any long literal in either
 test file is not a number R printed. Everything, including `frontend`
 (`bun test src`: 33 pass; `bun run typecheck`: clean) is described in
-`MetaManifold-Evidence/pr25/README.md` at the tip of branch `arena/01a10031-metamanifold-evidence`, which also carries
-the patch. What I could not run is the Julia test suite itself; that is CI's.
+`MetaManifold-Evidence/pr25/README.md` at `27ae7ba830b6f3946095a2e648205345d93a33be`,
+which also carries the patch. What I could not run is the Julia test suite itself; that is CI's.
 
 **One scope call I would like a decision on.** `min_prevalence` is one setting for
 both methods, so shipping `0.25` also filters rare taxa for `nb_glm`, which is a
