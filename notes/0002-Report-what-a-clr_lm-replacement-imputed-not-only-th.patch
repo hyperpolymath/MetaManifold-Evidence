@@ -1,0 +1,184 @@
+From ee9a3f6376d5ccf6276d26b2cde5b72ad62fc05c Mon Sep 17 00:00:00 2001
+From: "Jonathan D.A. Jewell" <6759885+hyperpolymath@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 14:28:50 +0000
+Subject: [PATCH 2/2] Report what a clr_lm replacement imputed, not only the
+ worst sample
+
+`diagnostics.zero_replacement` gains `via` (which code produced the numbers:
+`zCompositions::multRepl`, the Julia reference, or nothing, because a table
+with no zeros needs no replacement), the median and count over 10% of the
+imputed share, and the size of the composition. The summary line under a
+`clr_lm` result now says what the estimate is a difference of - min_prevalence
+chose the taxa the log-ratios are taken over, and it is the same number that
+kept the imputed mass small - and quotes the median share next to the maximum,
+because "at most X%" on its own reads like an all-clear for a table where every
+sample is mostly imputed.
+
+The sentence is `zeroReplacementLine`, in `differentialTable.ts` beside
+`configLine` and `effectValue` so it is tested rather than rendered.
+
+Refs #25
+---
+ frontend/src/api/types.ts                     |  6 ++-
+ frontend/src/components/DifferentialPanel.tsx |  8 +---
+ frontend/src/components/PipelineStages.tsx    |  6 +--
+ .../src/components/differentialTable.test.ts  | 41 ++++++++++++++++++-
+ frontend/src/components/differentialTable.ts  | 21 ++++++++++
+ 5 files changed, 71 insertions(+), 11 deletions(-)
+
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 6c8e8d2..d817ca4 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -389,7 +389,7 @@ export interface DifferentialRow {
+   /** nb_glm only; null for clr_lm. */
+   log2_fold_change: number | null
+   standard_error: number | null
+-  /** z (nb_glm) or t (clr_lm). */
++  /** z (nb_glm) or Welch's t (clr_lm). */
+   statistic: number | null
+   pvalue: number | null
+   /** Benjamini-Hochberg adjusted; null outside the tested family. */
+@@ -431,6 +431,10 @@ export interface DifferentialResult {
+     zero_replacement?: {
+       delta: number; zeros_replaced: number; n_taxa_in_composition: number
+       n_taxa_unobserved: number; max_imputed_fraction: number
++      median_imputed_fraction: number
++      n_samples_over_10_percent: number
++      /** The code that produced the replaced table, e.g. zCompositions::multRepl. */
++      via: string
+     }
+   }
+   rows: DifferentialRow[]
+diff --git a/frontend/src/components/DifferentialPanel.tsx b/frontend/src/components/DifferentialPanel.tsx
+index 1eb999b..e2b9d1f 100644
+--- a/frontend/src/components/DifferentialPanel.tsx
++++ b/frontend/src/components/DifferentialPanel.tsx
+@@ -10,7 +10,7 @@ import type { AnalysisOption } from './annotationShared'
+ import { AnalysisChart } from './AnalysisChart'
+ import { AddToReport } from './AddToReport'
+ import { saveBlob } from '../utils/download'
+-import { differentialCsv, effectValue, formatStat } from './differentialTable'
++import { differentialCsv, effectValue, formatStat, zeroReplacementLine } from './differentialTable'
+ 
+ const cell = { padding: '3px 10px', textAlign: 'right' } as const
+ const head = { padding: '4px 10px', textAlign: 'right' } as const
+@@ -109,11 +109,7 @@ export function DifferentialPanel({ study, runs, option, aggregate }: {
+             {result.diagnostics.n_boundary > 0 && `, ${result.diagnostics.n_boundary} at a dispersion boundary`}
+             {result.diagnostics.n_filtered > 0 && `, ${result.diagnostics.n_filtered} below the prevalence threshold`}
+             . Samples: {Object.entries(result.n_samples).map(([g, n]) => `${g} ${n}`).join(', ')}.
+-            {result.diagnostics.zero_replacement && (() => {
+-              const z = result.diagnostics.zero_replacement
+-              return ` ${z.zeros_replaced} zeros replaced (delta ${z.delta}); replaced values hold at most ` +
+-                `${(100 * z.max_imputed_fraction).toPrecision(2)}% of any sample, and are not measurements.`
+-            })()}
++            {zeroReplacementLine(result)}
+           </p>
+ 
+           <AnalysisChart study={study} figure={result.figure} />
+diff --git a/frontend/src/components/PipelineStages.tsx b/frontend/src/components/PipelineStages.tsx
+index 0614432..bf7b938 100644
+--- a/frontend/src/components/PipelineStages.tsx
++++ b/frontend/src/components/PipelineStages.tsx
+@@ -150,10 +150,10 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
+   'analysis.alpha.rarefaction_iterations': 'rarefy draws averaged for each alpha diversity value.',
+   'analysis.beta.normalisation':  'Preparation before the Bray-Curtis dissimilarity used by NMDS and PERMANOVA: hellinger (square root of relative abundances), none, rarefy or srs.',
+   'analysis.beta.depth':          'Reads per sample for rarefy or srs; 0 uses the smallest non-empty sample.',
+-  'analysis.differential.method': 'Model fitted to each taxon: nb_glm (negative-binomial GLM on read counts; effect is a log2 fold change) or clr_lm (linear model on centred log-ratios after multiplicative zero replacement; effect is a CLR difference, not a fold change).',
++  'analysis.differential.method': 'Model fitted to each taxon: nb_glm (negative-binomial GLM on read counts; effect is a log2 fold change) or clr_lm (Welch\'s t test per taxon on centred log-ratios after multiplicative zero replacement by zCompositions::multRepl; effect is a CLR difference, not a fold change).',
+   'analysis.differential.offset': 'Library-size offset in each negative-binomial model: tss (total reads per sample) or rle (median-of-ratios over taxa present in every sample; refused when there are none). Used by nb_glm only.',
+-  'analysis.differential.min_prevalence': 'Fraction of samples, 0 to 1, in which a taxon must have reads to be tested; taxa below it are listed as filtered.',
+-  'analysis.differential.replacement_delta': 'clr_lm only: fraction, between 0 and 1, of a taxon\'s smallest observed count given to each of its zeros; the rest of the sample is scaled so its total is unchanged. Replaced zeros are not measurements.',
++  'analysis.differential.min_prevalence': 'Fraction of samples, 0 to 1, in which a taxon must have reads to be tested; taxa below it are listed as filtered. For clr_lm it also chooses the composition the log-ratios are taken over, which is what keeps the imputed zeros a small share of each sample.',
++  'analysis.differential.replacement_delta': 'clr_lm only: fraction, between 0 and 1, of a taxon\'s smallest observed count given to each of its zeros (multRepl\'s frac); the rest of the sample is scaled so its total is unchanged. Replaced zeros are not measurements; where a sample\'s zeros would take over its whole total the analysis is refused, with the threshold that clears it.',
+   'analysis.alpha.show_points':   'Show individual samples overlaid on alpha comparison boxplots.',
+   'analysis.alpha.annotate_significance': 'Annotate alpha comparison panels with Kruskal-Wallis significance.',
+   'analysis.alpha.pairwise_brackets': 'Run BH-adjusted pairwise Wilcoxon rank-sum tests between every group pair and draw brackets, including n.s. results.',
+diff --git a/frontend/src/components/differentialTable.test.ts b/frontend/src/components/differentialTable.test.ts
+index 092e6a9..0452227 100644
+--- a/frontend/src/components/differentialTable.test.ts
++++ b/frontend/src/components/differentialTable.test.ts
+@@ -2,7 +2,7 @@
+ // SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell (hyperpolymath) <j.d.a.jewell@open.ac.uk>
+ import { describe, expect, test } from 'bun:test'
+ import type { DifferentialResult } from '../api/types'
+-import { configLine, csvField, differentialCsv, effectValue, formatStat } from './differentialTable'
++import { configLine, csvField, differentialCsv, effectValue, formatStat, zeroReplacementLine } from './differentialTable'
+ 
+ const result: DifferentialResult = {
+   status: 'partial',
+@@ -74,3 +74,42 @@ describe('clr_lm results', () => {
+     expect(differentialCsv(clr).split('\r\n')[2]).toBe(`# ${configLine(clr)}`)
+   })
+ })
++
++describe('what a clr_lm replacement imputed', () => {
++  type Zr = NonNullable<DifferentialResult['diagnostics']['zero_replacement']>
++  const withZr = (zr: Zr, minPrevalence = 0.1): DifferentialResult => ({
++    ...result,
++    method: 'CLR LM',
++    effect: { key: 'estimate', label: 'CLR difference' },
++    config: { method: 'clr_lm', min_prevalence: minPrevalence, replacement_delta: 0.65 },
++    diagnostics: { ...result.diagnostics, zero_replacement: zr },
++  })
++
++  test('a result with no replacement to report says nothing', () => {
++    expect(zeroReplacementLine(result)).toBe('')
++    expect(zeroReplacementLine({ ...result, method: 'CLR LM' })).toBe('')
++  })
++
++  test('a table with no zeros says so instead of claiming a replacement', () => {
++    const line = zeroReplacementLine(withZr({
++      delta: 0.65, zeros_replaced: 0, n_taxa_in_composition: 4, n_taxa_unobserved: 0,
++      max_imputed_fraction: 0, median_imputed_fraction: 0, n_samples_over_10_percent: 0,
++      via: 'none (no zeros to replace)',
++    }))
++    expect(line).toBe(' Nothing was imputed: the 4 taxa at or above min_prevalence 0.1 have no zeros.')
++  })
++
++  test('the median share is reported next to the worst one, and named as not a measurement', () => {
++    const line = zeroReplacementLine(withZr({
++      delta: 0.65, zeros_replaced: 9437, n_taxa_in_composition: 18, n_taxa_unobserved: 1,
++      max_imputed_fraction: 0.08, median_imputed_fraction: 0.011, n_samples_over_10_percent: 0,
++      via: 'zCompositions::multRepl',
++    }, 0.1))
++    expect(line).toContain('9437 zeros replaced by zCompositions::multRepl (frac 0.65)')
++    expect(line).toContain('1.1% of the median sample')
++    expect(line).toContain('at most 8.0% of any sample')
++    expect(line).toContain('over 10% in 0 of them')
++    expect(line).toContain('a replaced value is not a measurement')
++    expect(line).toContain('the 18 taxa the log-ratios are taken over')
++  })
++})
+diff --git a/frontend/src/components/differentialTable.ts b/frontend/src/components/differentialTable.ts
+index be40d98..6468c6d 100644
+--- a/frontend/src/components/differentialTable.ts
++++ b/frontend/src/components/differentialTable.ts
+@@ -55,3 +55,24 @@ export function configLine(result: DifferentialResult): string {
+ export function effectValue(result: DifferentialResult, row: DifferentialRow): number | null {
+   return row[result.effect.key]
+ }
++
++/**
++ * What a `clr_lm` analysis imputed, in one sentence: how many zeros, by which
++ * code, and how much of each sample the result now rests on. A table with no
++ * zeros says so rather than reporting a replacement that did not happen.
++ */
++export function zeroReplacementLine(result: DifferentialResult): string {
++  const z = result.diagnostics.zero_replacement
++  if (!z) return ''
++  if (z.zeros_replaced === 0) {
++    return ` Nothing was imputed: the ${z.n_taxa_in_composition} taxa at or above ` +
++      `min_prevalence ${result.config.min_prevalence} have no zeros.`
++  }
++  const pct = (v: number) => `${(100 * v).toPrecision(2)}%`
++  return ` ${z.zeros_replaced} zeros replaced by ${z.via} (frac ${z.delta}). They hold ` +
++    `${pct(z.median_imputed_fraction)} of the median sample and at most ` +
++    `${pct(z.max_imputed_fraction)} of any sample, over 10% in ` +
++    `${z.n_samples_over_10_percent} of them, and a replaced value is not a measurement. ` +
++    `min_prevalence ${result.config.min_prevalence} chose the ${z.n_taxa_in_composition} ` +
++    `taxa the log-ratios are taken over.`
++}
+-- 
+2.39.5
+
