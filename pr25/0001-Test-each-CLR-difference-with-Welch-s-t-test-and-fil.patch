@@ -1,4 +1,4 @@
-From c5ba8c75bc4bcfb34861cc87f39ceba2dde01284 Mon Sep 17 00:00:00 2001
+From df468ae0165fecd6c8198dfeecd090f6d5174fae Mon Sep 17 00:00:00 2001
 From: "Jonathan D.A. Jewell" <6759885+hyperpolymath@users.noreply.github.com>
 Date: Sat, 3 Oct 2026 10:42:03 +0000
 Subject: [PATCH] Test each CLR difference with Welch's t test, and filter
@@ -17,9 +17,9 @@ groups that need not have one. Both halves are fixed.
 - Each taxon is tested with stats::t.test(var.equal = FALSE); the estimate and
   standard error are unchanged, the degrees of freedom are Welch and
   Satterthwaite's, and every row reports them. stats::lm is gone.
-- zCompositions is pinned in renv.lock and required by CI; the replacement tests
-  skip loudly when it cannot be loaded, and compare against cmultRepl and a
-  direct t.test call when it can.
+- zCompositions is pinned in renv.lock and required by CI. Where it cannot be
+  loaded the tests assert the explicit refusal rather than skipping past it, and
+  where it can they compare against cmultRepl and a direct t.test call.
 - The table and CSV carry df, and the method line says which test ran.
 ---
  .github/workflows/ci.yml                      |   2 +-
@@ -35,8 +35,8 @@ groups that need not have one. Both halves are fixed.
  src/analysis/zero_replacement.jl              | 267 +++++++++++----
  src/server/routes/analysis.jl                 |   5 +-
  test/unit/test_differential.jl                | 318 ++++++++++++++++--
- test/unit/test_zero_replacement.jl            | 259 +++++++++++---
- 14 files changed, 1040 insertions(+), 250 deletions(-)
+ test/unit/test_zero_replacement.jl            | 277 ++++++++++++---
+ 14 files changed, 1058 insertions(+), 250 deletions(-)
 
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 index 912daab..598d461 100644
@@ -1527,10 +1527,10 @@ index b2eee27..d4ace54 100644
      end
  
 diff --git a/test/unit/test_zero_replacement.jl b/test/unit/test_zero_replacement.jl
-index 4215312..133ffb8 100644
+index 4215312..dfeb6fc 100644
 --- a/test/unit/test_zero_replacement.jl
 +++ b/test/unit/test_zero_replacement.jl
-@@ -1,78 +1,227 @@
+@@ -1,78 +1,245 @@
  # SPDX-License-Identifier: AGPL-3.0-only
  # SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell (hyperpolymath) <j.d.a.jewell@open.ac.uk>
  #
@@ -1666,7 +1666,25 @@ index 4215312..133ffb8 100644
 -            @test_throws ArgumentError multiplicative_replacement(x; delta=d)
 +    @testset "cmultRepl parity: three tables, three deltas" begin
 +        if !HAVE_ZC
-+            @test_skip true
++            # This is the branch that runs where the package is missing, so it has
++            # to be an assertion rather than a skip: replacement is defined by
++            # cmultRepl, and there is no cheaper stand-in behind it.
++            e = try
++                multiplicative_replacement([0.0 2 8; 4 0 6])
++                nothing
++            catch err
++                err
++            end
++            @test e isa ZCompositionsUnavailable
++            msg = sprint(showerror, e)
++            @test occursin("zCompositions is not available", msg)
++            @test occursin("cmultRepl is not in the project library", msg)
++            @test occursin("renv::install", msg)
++            # A table with no zeros needs no package at all, and must not fail.
++            out = multiplicative_replacement([1.0 2 3; 4 5 6])
++            @test out.zeros_replaced == 0
++            @test out.values[1, :] ≈ [1, 2, 3] ./ 6
++            @test out.values[2, :] ≈ [4, 5, 6] ./ 15
 +        else
 +            # The wrapper is a thin shell, so it is checked against the package
 +            # rather than against arithmetic copied out of it.

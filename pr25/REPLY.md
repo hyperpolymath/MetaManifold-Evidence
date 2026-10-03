@@ -8,7 +8,7 @@ Apply `0001-*.patch` first, then paste the body below. The evidence it cites is
 already pushed: `pr25/` in `MetaManifold-Evidence` at
 `27ae7ba830b6f3946095a2e648205345d93a33be`, on branch
 `arena/01a10031-metamanifold-evidence`; the patch reproduces the commit
-`c5ba8c75bc4bcfb34861cc87f39ceba2dde01284`.
+`df468ae0165fecd6c8198dfeecd090f6d5174fae`.
 
 ---
 
@@ -98,7 +98,10 @@ do not need R (the refusal text, the invariants) now run unconditionally, the
 compares against a hand-remembered number. `test/unit/test_differential.jl`
 gained the sparse fixture, the filter-before-replacement comparison, the Welch
 versus pooled check, `fit_welch`'s three failure notes, and a per-taxon loop that
-matches every estimate, p-value and df against a direct `t.test` call.
+matches every estimate, p-value and df against a direct `t.test` call. Where
+zCompositions cannot be loaded the replacement test does not skip: it asserts the
+`ZCompositionsUnavailable` refusal, because an unavailable operator has to be an
+error rather than a quiet fallback.
 
 **Verification, stated precisely.** R is not runnable in the environment I worked
 in (no host `libR.so`, so RCall cannot start), so I checked the statistics a
