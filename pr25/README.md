@@ -39,7 +39,7 @@ and five files in `frontend/src`.
 | --- | --- |
 | `tools/clr_model.py` | An independent implementation of the whole `clr_lm` chain — `cmultRepl`'s arithmetic, the CLR, Welch's and the pooled t test, Benjamini-Hochberg — written from `cran/zCompositions/R/cmultRepl.R` rather than from the Julia, so the two can disagree. Every literal in the shipped tests came from here. |
 | `tools/fixture.py` | Prints those same quantities as Julia literals, which is how the test files were written without typing numbers. |
-| `tools/jl_parse.py` | tree-sitter parse gate for the five touched `.jl` files. Syntax only: it is a licence to hand the file to `julia --project=. test/runtests.jl`, not a substitute. || `rcheck/patch_*.py` | not shipped: the two one-off editors used to extend the harness in place |
+| `tools/jl_parse.py` | tree-sitter parse gate for the five touched `.jl` files. Syntax only: it is a licence to hand the file to `julia --project=. test/runtests.jl`, not a substitute. |
 | `rcheck/extract.py` | Lifts the R strings out of the shipped Julia sources **verbatim** — `_REPLACE_R`, `_FIT_WELCH_R`, and `_FIT_R` for the negative-binomial path — and builds one webR script that feeds them the fixtures the Julia tests use. |
 | `rcheck/run.mjs` | Runs that script in real R (webR 0.6.0, R 4.6.0) with `zc/R/*.R` — the pinned 1.6.2 sources of zCompositions — evaluated into the global environment, since webR sees no host filesystem. |
 | `rcheck/check.py` | Fails unless R's answer matches the model on all 110 emitted lines, *and* unless every constant with more than eight figures in the two Julia test files is a number R itself printed. |
