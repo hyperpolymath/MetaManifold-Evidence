@@ -1,0 +1,1818 @@
+From c5ba8c75bc4bcfb34861cc87f39ceba2dde01284 Mon Sep 17 00:00:00 2001
+From: "Jonathan D.A. Jewell" <6759885+hyperpolymath@users.noreply.github.com>
+Date: Sat, 3 Oct 2026 10:42:03 +0000
+Subject: [PATCH] Test each CLR difference with Welch's t test, and filter
+ before replacing
+
+The clr_lm method replaced zeros over every observed taxon, took the centred
+log-ratios, and only then dropped the taxa below min_prevalence, and it judged
+each taxon with a Gaussian linear model that borrowed one variance between two
+groups that need not have one. Both halves are fixed.
+
+- min_prevalence now chooses the composition that cmultRepl works on, so nothing
+  is imputed into a taxon the report does not test. On a shallow table the old
+  order could ask for more of a sample's total than it had reads; that case now
+  refuses with the sample, the percentage its zeros would hold, and the largest
+  delta that could still work. The shipped default is 0.25.
+- Each taxon is tested with stats::t.test(var.equal = FALSE); the estimate and
+  standard error are unchanged, the degrees of freedom are Welch and
+  Satterthwaite's, and every row reports them. stats::lm is gone.
+- zCompositions is pinned in renv.lock and required by CI; the replacement tests
+  skip loudly when it cannot be loaded, and compare against cmultRepl and a
+  direct t.test call when it can.
+- The table and CSV carry df, and the method line says which test ran.
+---
+ .github/workflows/ci.yml                      |   2 +-
+ R/_renv_dependencies.R                        |   1 +
+ config/defaults/pipeline.yml                  |  21 +-
+ frontend/src/api/types.ts                     |  22 +-
+ frontend/src/components/DifferentialPanel.tsx |  18 +-
+ frontend/src/components/PipelineStages.tsx    |   4 +-
+ .../src/components/differentialTable.test.ts  |  61 +++-
+ frontend/src/components/differentialTable.ts  |   7 +-
+ renv.lock                                     | 102 ++++++
+ src/analysis/differential.jl                  | 203 ++++++-----
+ src/analysis/zero_replacement.jl              | 267 +++++++++++----
+ src/server/routes/analysis.jl                 |   5 +-
+ test/unit/test_differential.jl                | 318 ++++++++++++++++--
+ test/unit/test_zero_replacement.jl            | 259 +++++++++++---
+ 14 files changed, 1040 insertions(+), 250 deletions(-)
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 912daab..598d461 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -139,7 +139,7 @@ jobs:
+           sudo chmod 777 "$RENV_PATHS_CACHE"
+           sudo env R_CLI_DYNAMIC=false TERM=dumb Rscript --no-init-file -e 'install.packages(c("renv", "BiocManager"), repos="https://cloud.r-project.org", lib=.Library)'
+           sudo env RENV_PATHS_CACHE="$RENV_PATHS_CACHE" R_CLI_DYNAMIC=false TERM=dumb Rscript --no-init-file -e 'renv::restore(project=".", library=.Library, prompt=FALSE)'
+-          Rscript --no-init-file -e 'for (pkg in c("dada2","Biostrings","ShortRead","vegan","dplyr","MASS")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
++          Rscript --no-init-file -e 'for (pkg in c("dada2","Biostrings","ShortRead","vegan","dplyr","MASS","zCompositions")) if (!require(pkg,character.only=TRUE,quietly=TRUE)) stop(pkg, " failed to install")'
+ 
+       # Saved on failure too, since the packages built before a failure are the ones
+       # the next attempt should reuse. Root writes the cache, so it is made readable first.
+diff --git a/R/_renv_dependencies.R b/R/_renv_dependencies.R
+index d9b4c57..4111eaa 100644
+--- a/R/_renv_dependencies.R
++++ b/R/_renv_dependencies.R
+@@ -6,4 +6,5 @@ if (FALSE) {
+     library(dplyr)
+     library(tibble)
+     library(MASS)
++    library(zCompositions)
+ }
+diff --git a/config/defaults/pipeline.yml b/config/defaults/pipeline.yml
+index 15c4f74..14d17d6 100644
+--- a/config/defaults/pipeline.yml
++++ b/config/defaults/pipeline.yml
+@@ -349,8 +349,9 @@ analysis:
+   differential:
+     # The model fitted to each taxon. nb_glm: a negative-binomial GLM on the read
+     # counts with a library-size offset; the effect is a log2 fold change. clr_lm:
+-    # a linear model on centred log-ratios after multiplicative replacement of
+-    # zeros; the effect is a difference in CLR units, not a fold change.
++    # Welch's two-sample t test on centred log-ratios after multiplicative
++    # replacement of zeros (zCompositions::cmultRepl); the effect is a difference
++    # in CLR units, not a fold change.
+     method: nb_glm
+     # How library size enters each model, as a log offset: tss (total reads per
+     # sample) or rle (median-of-ratios over the taxa present in every sample).
+@@ -359,8 +360,16 @@ analysis:
+     offset: tss
+     # Fraction of samples, 0 to 1, in which a taxon must have reads to be
+     # tested. Taxa below it are listed as filtered, without a p-value.
+-    min_prevalence: 0.0
+-    # clr_lm only: a zero is replaced by this fraction, between 0 and 1, of the
+-    # taxon's smallest observed count, and the other counts in the sample are
+-    # scaled down so its total is unchanged. A replaced zero is not a measurement.
++    # Under clr_lm this runs before zero replacement, which is what keeps the
++    # imputed values bounded: zeros are filled in only over the taxa the test is
++    # run on. Left near 0 on a shallow 16S library, a sample missing most of the
++    # composition gets most of its total from imputed values instead, and at some
++    # point there is nothing left to scale down. 0.25 is the tier where a taxon
++    # has to show in a quarter of the samples to be believed at all.
++    min_prevalence: 0.25
++    # clr_lm only: cmultRepl's frac, between 0 and 1. A zero is replaced by this
++    # fraction of its replacement limit - the smaller of half the sample's own
++    # per-taxon threshold and the taxon's smallest observed proportion anywhere -
++    # and the other values in the sample are scaled down so its total is
++    # unchanged. A replaced zero is not a measurement.
+     replacement_delta: 0.65
+diff --git a/frontend/src/api/types.ts b/frontend/src/api/types.ts
+index 6c8e8d2..f724810 100644
+--- a/frontend/src/api/types.ts
++++ b/frontend/src/api/types.ts
+@@ -392,6 +392,13 @@ export interface DifferentialRow {
+   /** z (nb_glm) or t (clr_lm). */
+   statistic: number | null
+   pvalue: number | null
++  /**
++   * clr_lm only: the Welch-Satterthwaite degrees of freedom of the t test.
++   * They are where a reader can see that the unequal-variance test ran, since
++   * with equal group sizes the estimate and the standard error agree with the
++   * pooled test and only these move.
++   */
++  df?: number | null
+   /** Benjamini-Hochberg adjusted; null outside the tested family. */
+   padj: number | null
+   /** nb_glm only. */
+@@ -427,10 +434,21 @@ export interface DifferentialResult {
+   }
+   diagnostics: {
+     n_taxa: number; n_tested: number; n_failed: number; n_boundary: number; n_filtered: number
++    /** clr_lm only: which test ran, so a saved result can be read years later. */
++    fit_method?: string
+     /** clr_lm only. */
+     zero_replacement?: {
+-      delta: number; zeros_replaced: number; n_taxa_in_composition: number
+-      n_taxa_unobserved: number; max_imputed_fraction: number
++      operator: string
++      delta: number; threshold: number; zeros_replaced: number
++      /** Samples that had at least one zero replaced. */
++      n_samples_replaced: number
++      /** Size of the composition the zeros were replaced over. */
++      n_taxa_in_composition: number
++      /** Taxa dropped by min_prevalence, which runs before the replacement. */
++      n_taxa_excluded: number
++      n_taxa_unobserved: number
++      /** Share of a sample's total held by imputed values: worst, then median. */
++      max_imputed_fraction: number; median_imputed_fraction: number
+     }
+   }
+   rows: DifferentialRow[]
+diff --git a/frontend/src/components/DifferentialPanel.tsx b/frontend/src/components/DifferentialPanel.tsx
+index 1eb999b..27101df 100644
+--- a/frontend/src/components/DifferentialPanel.tsx
++++ b/frontend/src/components/DifferentialPanel.tsx
+@@ -111,8 +111,13 @@ export function DifferentialPanel({ study, runs, option, aggregate }: {
+             . Samples: {Object.entries(result.n_samples).map(([g, n]) => `${g} ${n}`).join(', ')}.
+             {result.diagnostics.zero_replacement && (() => {
+               const z = result.diagnostics.zero_replacement
+-              return ` ${z.zeros_replaced} zeros replaced (delta ${z.delta}); replaced values hold at most ` +
+-                `${(100 * z.max_imputed_fraction).toPrecision(2)}% of any sample, and are not measurements.`
++              return ` ${z.zeros_replaced} zeros were replaced in ${z.n_samples_replaced} of ` +
++                `${Object.values(result.n_samples).reduce((a, b) => a + b, 0)} samples by ${z.operator} ` +
++                `(delta ${z.delta}, threshold ${z.threshold}), over the ${z.n_taxa_in_composition} taxa ` +
++                `at or above the prevalence filter (${z.n_taxa_excluded} rarer taxa and ` +
++                `${z.n_taxa_unobserved} unobserved ones were left out first). Replaced values hold at ` +
++                `most ${(100 * z.max_imputed_fraction).toPrecision(2)}% of a sample (median ` +
++                `${(100 * z.median_imputed_fraction).toPrecision(2)}%), and are not measurements.`
+             })()}
+           </p>
+ 
+@@ -134,6 +139,7 @@ export function DifferentialPanel({ study, runs, option, aggregate }: {
+                   <th style={head}>{result.effect.label}</th>
+                   {result.config.method === 'nb_glm' && <th style={head}>Estimate (ln)</th>}
+                   <th style={head}>SE</th>
++                  {result.config.method === 'clr_lm' && <th style={head}>t (df)</th>}
+                   <th style={head}>p</th>
+                   <th style={head}>padj (BH)</th>
+                   <th style={{ ...head, textAlign: 'left' }}>Status</th>
+@@ -146,6 +152,14 @@ export function DifferentialPanel({ study, runs, option, aggregate }: {
+                     <td style={cell}>{formatStat(effectValue(result, r))}</td>
+                     {result.config.method === 'nb_glm' && <td style={cell}>{formatStat(r.estimate)}</td>}
+                     <td style={cell}>{formatStat(r.standard_error)}</td>
++                    {result.config.method === 'clr_lm' && (
++                      <td style={cell}>
++                        {formatStat(r.statistic)}
++                        {r.df != null && (
++                          <span style={{ color: 'var(--color-muted-fg)' }}> ({formatStat(r.df)})</span>
++                        )}
++                      </td>
++                    )}
+                     <td style={cell}>{formatStat(r.pvalue)}</td>
+                     <td style={cell}>{formatStat(r.padj)}</td>
+                     <td style={{ ...cell, textAlign: 'left' }} title={r.note || undefined}>
+diff --git a/frontend/src/components/PipelineStages.tsx b/frontend/src/components/PipelineStages.tsx
+index 0614432..b281eba 100644
+--- a/frontend/src/components/PipelineStages.tsx
++++ b/frontend/src/components/PipelineStages.tsx
+@@ -150,9 +150,9 @@ export const CONFIG_DESCRIPTIONS: Record<string, string> = {
+   'analysis.alpha.rarefaction_iterations': 'rarefy draws averaged for each alpha diversity value.',
+   'analysis.beta.normalisation':  'Preparation before the Bray-Curtis dissimilarity used by NMDS and PERMANOVA: hellinger (square root of relative abundances), none, rarefy or srs.',
+   'analysis.beta.depth':          'Reads per sample for rarefy or srs; 0 uses the smallest non-empty sample.',
+-  'analysis.differential.method': 'Model fitted to each taxon: nb_glm (negative-binomial GLM on read counts; effect is a log2 fold change) or clr_lm (linear model on centred log-ratios after multiplicative zero replacement; effect is a CLR difference, not a fold change).',
++  'analysis.differential.method': 'Model fitted to each taxon: nb_glm (negative-binomial GLM on read counts; effect is a log2 fold change) or clr_lm (Welch\'s two sample t test on centred log-ratios after multiplicative zero replacement; effect is a CLR difference, not a fold change, and the reported degrees of freedom are Welch and Satterthwaite\'s).',
+   'analysis.differential.offset': 'Library-size offset in each negative-binomial model: tss (total reads per sample) or rle (median-of-ratios over taxa present in every sample; refused when there are none). Used by nb_glm only.',
+-  'analysis.differential.min_prevalence': 'Fraction of samples, 0 to 1, in which a taxon must have reads to be tested; taxa below it are listed as filtered.',
++  'analysis.differential.min_prevalence': 'Fraction of samples, 0 to 1, in which a taxon must have reads to be tested; taxa below it are listed as filtered. Under clr_lm it runs before zero replacement, so a low value lets imputed values dominate a shallow library.',
+   'analysis.differential.replacement_delta': 'clr_lm only: fraction, between 0 and 1, of a taxon\'s smallest observed count given to each of its zeros; the rest of the sample is scaled so its total is unchanged. Replaced zeros are not measurements.',
+   'analysis.alpha.show_points':   'Show individual samples overlaid on alpha comparison boxplots.',
+   'analysis.alpha.annotate_significance': 'Annotate alpha comparison panels with Kruskal-Wallis significance.',
+diff --git a/frontend/src/components/differentialTable.test.ts b/frontend/src/components/differentialTable.test.ts
+index 092e6a9..237b3c7 100644
+--- a/frontend/src/components/differentialTable.test.ts
++++ b/frontend/src/components/differentialTable.test.ts
+@@ -38,9 +38,9 @@ describe('differential CSV', () => {
+   test('keeps every taxon, full precision, and leaves missing statistics empty', () => {
+     const lines = differentialCsv(result).trimEnd().split('\r\n')
+     expect(lines[0]).toContain('run_B vs run_A (reference)')
+-    expect(lines[3]).toBe('taxon,status,log2_fold_change,estimate,standard_error,statistic,pvalue,padj,dispersion_theta,prevalence,note')
+-    expect(lines[4]).toBe('Bacteroides,ok,2,1.3862943611198906,0.25,5.545,2.9e-8,5.8e-8,12.5,1,')
+-    expect(lines[5].startsWith('"Odd, ""quoted""",failed,,,,,,,,0.5,')).toBe(true)
++    expect(lines[3]).toBe('taxon,status,log2_fold_change,estimate,standard_error,statistic,pvalue,df,padj,dispersion_theta,prevalence,note')
++    expect(lines[4]).toBe('Bacteroides,ok,2,1.3862943611198906,0.25,5.545,2.9e-8,,5.8e-8,12.5,1,')
++    expect(lines[5].startsWith('"Odd, ""quoted""",failed,,,,,,,,,0.5,')).toBe(true)
+     expect(lines).toHaveLength(6)
+   })
+ })
+@@ -69,8 +69,61 @@ describe('clr_lm results', () => {
+   })
+ 
+   test('the settings line names the delta and says the estimate is not a fold change', () => {
+-    expect(configLine(clr)).toBe('method clr_lm, replacement_delta 0.65, min_prevalence 0; estimate is a CLR difference, not a fold change')
++    expect(configLine(clr)).toBe('method clr_lm, replacement_delta 0.65, min_prevalence 0 (applied before zero replacement); estimate is a CLR difference, not a fold change')
+     expect(configLine(result)).toBe('method nb_glm, offset tss, min_prevalence 0')
+     expect(differentialCsv(clr).split('\r\n')[2]).toBe(`# ${configLine(clr)}`)
+   })
+ })
++
++describe('a Welch t test result', () => {
++  // The numbers are the effect fixture's first taxon, as real R computes them
++  // (estimate 1.7772749137343919, t 6.9493417212103958 on 21.773496214508405 df).
++  const welch: DifferentialResult = {
++    ...result,
++    method: "Welch's t test per taxon (stats::t.test with var.equal = FALSE) on centred log-ratios",
++    effect: { key: 'estimate', label: 'CLR difference' },
++    config: { method: 'clr_lm', min_prevalence: 0.25, replacement_delta: 0.65 },
++    diagnostics: {
++      ...result.diagnostics,
++      fit_method: 'stats::t.test (Welch, var.equal = FALSE)',
++      zero_replacement: {
++        operator: 'zCompositions::cmultRepl', delta: 0.65, threshold: 0.5,
++        zeros_replaced: 0, n_samples_replaced: 0, n_taxa_in_composition: 3,
++        n_taxa_excluded: 0, n_taxa_unobserved: 0,
++        max_imputed_fraction: 0, median_imputed_fraction: 0,
++      },
++    },
++    rows: [
++      { taxon: 't_up', status: 'ok', note: '', estimate: 1.7772749137343919, log2_fold_change: null,
++        standard_error: 0.25574723262059357, statistic: 6.9493417212103958, pvalue: 5.9559757223049031e-7,
++        df: 21.773496214508405, padj: 8.934e-7, dispersion_theta: null, prevalence: 1 },
++      { taxon: 'rare', status: 'filtered', note: 'present in 1 of 24 samples, below analysis.differential.min_prevalence = 0.25',
++        estimate: null, log2_fold_change: null, standard_error: null, statistic: null, pvalue: null,
++        df: null, padj: null, dispersion_theta: null, prevalence: 1 / 24 },
++    ],
++  }
++
++  test('the degrees of freedom are exported beside the p-value they belong to', () => {
++    const lines = differentialCsv(welch).trimEnd().split('\r\n')
++    // JavaScript's shortest round-tripping form of each number: R prints
++    // 1.7772749137343919 and String() gives 1.777274913734392. Same double, so
++    // the CSV still reads back to the exact value R computed.
++    expect(lines[4]).toBe('t_up,ok,,1.777274913734392,0.25574723262059357,6.949341721210396,5.955975722304903e-7,21.773496214508405,8.934e-7,,1,')
++    expect(lines[1]).toContain("stats::t.test with var.equal = FALSE")
++  })
++
++  test('a taxon the prevalence filter dropped keeps its reason and no numbers', () => {
++    const lines = differentialCsv(welch).trimEnd().split('\r\n')
++    expect(lines[5]).toBe('rare,filtered,,,,,,,,,0.041666666666666664,"present in 1 of 24 samples, below analysis.differential.min_prevalence = 0.25"')
++  })
++
++  test('the settings line says the filter ran before the replacement', () => {
++    expect(configLine(welch)).toBe('method clr_lm, replacement_delta 0.65, min_prevalence 0.25 (applied before zero replacement); estimate is a CLR difference, not a fold change')
++  })
++
++  test('the diagnostics name the operator, so a run records what it used', () => {
++    const z = welch.diagnostics.zero_replacement!
++    expect(z.operator).toBe('zCompositions::cmultRepl')
++    expect(welch.diagnostics.fit_method).toBe('stats::t.test (Welch, var.equal = FALSE)')
++  })
++})
+diff --git a/frontend/src/components/differentialTable.ts b/frontend/src/components/differentialTable.ts
+index be40d98..bbc86d5 100644
+--- a/frontend/src/components/differentialTable.ts
++++ b/frontend/src/components/differentialTable.ts
+@@ -4,7 +4,7 @@ import type { DifferentialResult, DifferentialRow } from '../api/types'
+ 
+ const COLUMNS = [
+   'taxon', 'status', 'log2_fold_change', 'estimate', 'standard_error', 'statistic',
+-  'pvalue', 'padj', 'dispersion_theta', 'prevalence', 'note',
++  'pvalue', 'df', 'padj', 'dispersion_theta', 'prevalence', 'note',
+ ] as const
+ 
+ /** Quote one CSV field when it holds a comma, quote or line break (RFC 4180). */
+@@ -27,7 +27,8 @@ export function differentialCsv(result: DifferentialResult): string {
+     `# ${result.method}`,
+     `# ${configLine(result)}`,
+   ].map(l => l.replace(/[\r\n]+/g, ' '))
+-  const rows = result.rows.map(r => COLUMNS.map(c => csvField(r[c])).join(','))
++  // `df` is absent on an nb_glm row rather than null, hence the ?? null.
++  const rows = result.rows.map(r => COLUMNS.map(c => csvField(r[c] ?? null)).join(','))
+   return [...header, COLUMNS.join(','), ...rows].join('\r\n') + '\r\n'
+ }
+ 
+@@ -47,7 +48,7 @@ export function formatStat(value: number | null): string {
+ export function configLine(result: DifferentialResult): string {
+   const c = result.config
+   return c.method === 'clr_lm'
+-    ? `method clr_lm, replacement_delta ${c.replacement_delta}, min_prevalence ${c.min_prevalence}; estimate is a CLR difference, not a fold change`
++    ? `method clr_lm, replacement_delta ${c.replacement_delta}, min_prevalence ${c.min_prevalence} (applied before zero replacement); estimate is a CLR difference, not a fold change`
+     : `method nb_glm, offset ${c.offset}, min_prevalence ${c.min_prevalence}`
+ }
+ 
+diff --git a/renv.lock b/renv.lock
+index d0c9e12..74d2b81 100644
+--- a/renv.lock
++++ b/renv.lock
+@@ -673,6 +673,26 @@
+       "Author": "Constantin Ahlmann-Eltze [aut] (ORCID: <https://orcid.org/0000-0002-3762-068X>), Peter Hickey [aut, cre] (ORCID: <https://orcid.org/0000-0002-8153-6258>), Hervé Pagès [aut]",
+       "Maintainer": "Peter Hickey <peter.hickey@gmail.com>"
+     },
++    "NADA": {
++      "Package": "NADA",
++      "Version": "1.6-1.2",
++      "Source": "Repository",
++      "Title": "Nondetects and Data Analysis for Environmental Data",
++      "Author": "Lopaka Lee [aut, cre]",
++      "Authors@R": "person(given = \"Lopaka\", family = \"Lee\", role = c(\"aut\", \"cre\"), email = \"rclee@usgs.gov\")",
++      "Description": "Contains methods described by Dennis Helsel in his book \"Nondetects And Data Analysis: Statistics for Censored Environmental Data\".",
++      "Maintainer": "Lopaka Lee <rclee@usgs.gov>",
++      "Depends": [
++        "R (>= 2.10)",
++        "methods",
++        "survival"
++      ],
++      "License": "GPL (>= 2)",
++      "Collate": "All.R summary.R cen.R km.R reg.R mle.R ken.R ros.R icmle.R",
++      "NeedsCompilation": "no",
++      "Repository": "CRAN",
++      "Date/Publication": "2025-08-29 08:50:08 UTC"
++    },
+     "R6": {
+       "Package": "R6",
+       "Version": "2.6.1",
+@@ -2907,6 +2927,37 @@
+       "Maintainer": "Hadley Wickham <hadley@posit.co>",
+       "Repository": "CRAN"
+     },
++    "survival": {
++      "Package": "survival",
++      "Version": "3.8-12",
++      "Source": "Repository",
++      "Title": "Survival Analysis",
++      "Priority": "recommended",
++      "Date": "2026-09-02",
++      "Depends": [
++        "R (>= 4.1.0)"
++      ],
++      "Imports": [
++        "graphics",
++        "Matrix",
++        "methods",
++        "splines",
++        "stats",
++        "utils"
++      ],
++      "LazyData": "Yes",
++      "LazyDataCompression": "xz",
++      "ByteCompile": "Yes",
++      "Authors@R": "c(person(c(\"Terry\", \"M\"), \"Therneau\", email=\"terry.therneau@proton.me\", role=c(\"aut\", \"cre\")), person(\"Thomas\", \"Lumley\", role=c(\"ctb\", \"trl\"), comment=\"original S->R port and R maintainer until 2009\"), person(\"Atkinson\", \"Elizabeth\", role=\"ctb\"), person(\"Crowson\", \"Cynthia\", role=\"ctb\"))",
++      "Description": "Contains the core survival analysis routines, including definition of Surv objects, Kaplan-Meier and Aalen-Johansen (multi-state) curves, Cox models, and parametric accelerated failure time models.",
++      "License": "LGPL (>= 2)",
++      "URL": "https://github.com/therneau/survival",
++      "NeedsCompilation": "yes",
++      "Author": "Terry M Therneau [aut, cre], Thomas Lumley [ctb, trl] (original S->R port and R maintainer until 2009), Atkinson Elizabeth [ctb], Crowson Cynthia [ctb]",
++      "Maintainer": "Terry M Therneau <terry.therneau@proton.me>",
++      "Repository": "CRAN",
++      "Date/Publication": "2026-09-09 18:10:02 UTC"
++    },
+     "tibble": {
+       "Package": "tibble",
+       "Version": "3.3.1",
+@@ -3015,6 +3066,29 @@
+       "Maintainer": "Lionel Henry <lionel@posit.co>",
+       "Repository": "CRAN"
+     },
++    "truncnorm": {
++      "Package": "truncnorm",
++      "Version": "1.0-9",
++      "Source": "Repository",
++      "Title": "Truncated Normal Distribution",
++      "Description": "Density, probability, quantile and random number generation functions for the truncated normal distribution.",
++      "Authors@R": "c(person(\"Olaf\", \"Mersmann\", role=c(\"aut\", \"cre\"), email=\"olafm@p-value.net\"), person(\"Heike\", \"Trautmann\", role=c(\"aut\")), person(\"Detlef\", \"Steuer\", role=c(\"aut\")), person(\"Björn\", \"Bornkamp\", role=c(\"aut\")))",
++      "URL": "https://github.com/olafmersmann/truncnorm",
++      "BugReports": "https://github.com/olafmersmann/truncnorm/issues",
++      "Depends": [
++        "R (>= 3.4.0)"
++      ],
++      "Suggests": [
++        "testthat"
++      ],
++      "License": "GPL (>= 2)",
++      "Encoding": "UTF-8",
++      "NeedsCompilation": "yes",
++      "Author": "Olaf Mersmann [aut, cre], Heike Trautmann [aut], Detlef Steuer [aut], Björn Bornkamp [aut]",
++      "Maintainer": "Olaf Mersmann <olafm@p-value.net>",
++      "Repository": "CRAN",
++      "Date/Publication": "2023-03-20 21:40:02 UTC"
++    },
+     "utf8": {
+       "Package": "utf8",
+       "Version": "1.2.6",
+@@ -3192,6 +3266,34 @@
+       "Author": "Jim Hester [aut], Lionel Henry [aut, cre], Kirill Müller [aut], Kevin Ushey [aut], Hadley Wickham [aut], Winston Chang [aut], Jennifer Bryan [ctb], Richard Cotton [ctb], Posit Software, PBC [cph, fnd]",
+       "Maintainer": "Lionel Henry <lionel@posit.co>",
+       "Repository": "CRAN"
++    },
++    "zCompositions": {
++      "Package": "zCompositions",
++      "Version": "1.6.2",
++      "Source": "Repository",
++      "Type": "Package",
++      "Title": "Treatment of Zeros, Left-Censored and Missing Values in Compositional Data Sets",
++      "Date": "2026-06-20",
++      "Authors@R": "c(person(given = \"Javier\", family = \"Palarea-Albaladejo\", role = c(\"cre\",\"aut\"), email = \"javier.palarea@udg.edu\", comment = c(ORCID = \"0000-0003-0162-669X\")), person(given = \"Josep Antoni\", family = \"Martin-Fernandez\", role = c(\"aut\"), email = \"josepantoni.martin@udg.edu\", comment = c(ORCID = \"0000-0003-2366-1592\")))",
++      "Maintainer": "Javier Palarea-Albaladejo <javier.palarea@udg.edu>",
++      "Depends": [
++        "R (>= 2.14.0)",
++        "methods",
++        "MASS",
++        "NADA",
++        "truncnorm"
++      ],
++      "ByteCompile": "yes",
++      "Description": "Principled methods for the imputation of zeros, left-censored and missing data in compositional data sets (Palarea-Albaladejo and Martin-Fernandez (2015) <doi:10.1016/j.chemolab.2015.02.019>).",
++      "License": "GPL (>= 2)",
++      "Repository": "CRAN",
++      "RoxygenNote": "7.3.3",
++      "Encoding": "UTF-8",
++      "URL": "https://github.com/Japal/zCompositions",
++      "BugReports": "https://github.com/Japal/zCompositions/issues",
++      "NeedsCompilation": "no",
++      "Author": "Javier Palarea-Albaladejo [cre, aut] (ORCID: <https://orcid.org/0000-0003-0162-669X>), Josep Antoni Martin-Fernandez [aut] (ORCID: <https://orcid.org/0000-0003-2366-1592>)",
++      "Date/Publication": "2026-06-23 05:10:02 UTC"
+     }
+   }
+ }
+diff --git a/src/analysis/differential.jl b/src/analysis/differential.jl
+index 471fb47..e54f7af 100644
+--- a/src/analysis/differential.jl
++++ b/src/analysis/differential.jl
+@@ -7,9 +7,12 @@
+ #
+ # - nb_glm: a negative-binomial GLM per taxon (MASS::glm.nb) on the observed
+ #   integer read counts, with a library-size offset. There are no pseudocounts.
+-# - clr_lm: a Gaussian linear model per taxon (stats::lm) on centred log-ratios,
+-#   after multiplicative replacement of the zeros (`ZeroReplacement`). The
+-#   estimate is a difference in CLR units, not a fold change.
++# - clr_lm: Welch's two-sample t test per taxon (stats::t.test, var.equal =
++#   FALSE) on centred log-ratios, after multiplicative replacement of the zeros
++#   (`ZeroReplacement`, `zCompositions::cmultRepl`). The estimate is a
++#   difference in CLR units, not a fold change. Welch rather than pooled
++#   because the two groups of a study are rarely the same size and rarely share
++#   a variance, and the sizes below are not.
+ #
+ # Count matrices here are samples x taxa, as everywhere else in `Analysis`.
+ # Anything that is not a non-negative integer count is refused rather than
+@@ -20,11 +23,12 @@ module Differential
+ using DataFrames, RCall
+ using ..RRuntime: with_r_lock
+ using ..Analysis: _palette_hex, R_WAIT_SECONDS
+-using ..ZeroReplacement: DEFAULT_DELTA, multiplicative_replacement
++using ..ZeroReplacement: DEFAULT_DELTA, DETECTION_THRESHOLD, REPLACEMENT_METHOD,
++       multiplicative_replacement
+ 
+ export DifferentialConfig, ScalingRefusal, MASSUnavailable, OFFSET_METHODS, METHODS,
+        tss_factors, rle_factors, size_factors, bh_adjust, validate_counts,
+-       clr_transform, fit_nb, fit_lm, differential_abundance, volcano_chart
++       clr_transform, fit_nb, fit_welch, differential_abundance, volcano_chart
+ 
+ # Methods accepted under `analysis.differential.method`.
+ const METHODS = ("nb_glm", "clr_lm")
+@@ -48,8 +52,14 @@ Settings for one differential abundance analysis, read from
+ used by `nb_glm` only: a library-size offset has no meaning for a Gaussian
+ model of log-ratios, which are already free of library size.
+ `min_prevalence` is the fraction of samples, in [0, 1], in which a taxon must
+-have at least one read to be tested. `replacement_delta`, in (0, 1), is the
+-fraction of a taxon's detection limit given to a replaced zero by `clr_lm`.
++have at least one read to be tested; the struct default, 0.0, is no filtering at
++all, while the shipped `config/defaults/pipeline.yml` sets 0.25. Under `clr_lm`
++it selects the taxa *before*
++zero replacement, so that zeros are imputed into the composition the test is run
++on and not into every taxon the sequencing happened to see; a low value there
++lets the imputed values dominate a shallow library. `replacement_delta`, in
++(0, 1), is `cmultRepl`'s `frac`: the fraction of a zero's replacement limit that
++the zero receives.
+ """
+ struct DifferentialConfig
+     method            :: String
+@@ -345,17 +355,21 @@ function clr_transform(x::AbstractMatrix{<:Real})
+     l = log.(Float64.(x))
+     l .- sum(l; dims=2) ./ size(l, 2)
+ end
+-
+-# The per-taxon Gaussian fit loop, with the same `da_` naming and statuses as
+-# `_FIT_R` but no `boundary`: an lm has no dispersion parameter to run to a bound.
+-const _FIT_LM_R = raw"""
++# The per-taxon two-sample test loop, with the same `da_` naming and statuses as
++# `_FIT_R` but no `boundary`: a t test has no dispersion parameter to run to a
++# bound. Welch's test (`var.equal = FALSE`), so each group keeps its own variance
++# and the degrees of freedom are Welch and Satterthwaite's; the estimate and the
++# standard error are reported with the df because the df are where a reader can
++# see which of the two tests ran.
++const _FIT_WELCH_R = raw"""
+ da_g <- factor(da_group, levels = da_levels)
+-da_term <- paste0("da_g", da_levels[2])
++da_a <- da_g == da_levels[1]
++da_b <- da_g == da_levels[2]
+ da_n <- ncol(da_values)
+ da_result <- data.frame(status = rep("ok", da_n), note = rep("", da_n),
+                         estimate = rep(NA_real_, da_n), se = rep(NA_real_, da_n),
+                         statistic = rep(NA_real_, da_n), pvalue = rep(NA_real_, da_n),
+-                        stringsAsFactors = FALSE)
++                        df = rep(NA_real_, da_n), stringsAsFactors = FALSE)
+ for (da_j in seq_len(da_n)) {
+   da_y <- da_values[, da_j]
+   if (length(unique(da_y)) < 2L) {
+@@ -363,33 +377,40 @@ for (da_j in seq_len(da_n)) {
+     da_result[da_j, "note"] <- "the values are constant across samples: there is nothing to estimate"
+     next
+   }
++  if (length(unique(da_y[da_a])) < 2L && length(unique(da_y[da_b])) < 2L) {
++    da_result[da_j, "status"] <- "failed"
++    da_result[da_j, "note"] <- "each group has one distinct value, so no variance can be estimated"
++    next
++  }
+   da_warns <- character(0)
+-  da_co <- tryCatch(
++  da_fit <- tryCatch(
+     withCallingHandlers(
+-      summary(stats::lm(da_y ~ da_g))[["coefficients"]],
++      stats::t.test(x = da_y[da_b], y = da_y[da_a], var.equal = FALSE),
+       warning = function(w) {
+         da_warns <<- c(da_warns, conditionMessage(w))
+         invokeRestart("muffleWarning")
+       }),
+     error = function(e) e)
+-  if (inherits(da_co, "error")) {
++  if (inherits(da_fit, "error")) {
+     da_result[da_j, "status"] <- "failed"
+-    da_result[da_j, "note"] <- paste("lm stopped with an error:", conditionMessage(da_co))
++    da_result[da_j, "note"] <- paste("t.test stopped with an error:", conditionMessage(da_fit))
+     next
+   }
+-  if (!(da_term %in% rownames(da_co))) {
++  da_est <- unname(da_fit$estimate[1] - da_fit$estimate[2])
++  da_stat <- unname(da_fit$statistic)
++  da_df <- unname(da_fit$parameter)
++  da_p <- da_fit$p.value
++  # t.test gives the confidence interval, not the standard error, but Welch's is
++  # one line of arithmetic and the statistic has to be estimate over it.
++  da_se <- sqrt(stats::var(da_y[da_b]) / sum(da_b) + stats::var(da_y[da_a]) / sum(da_a))
++  if (!all(is.finite(c(da_est, da_se, da_stat, da_df, da_p))) || da_se <= 0 || da_p < 0 || da_p > 1) {
+     da_result[da_j, "status"] <- "failed"
+-    da_result[da_j, "note"] <- "the group coefficient is not estimable (aliased)"
+-    next
+-  }
+-  da_row <- da_co[da_term, ]
+-  if (!all(is.finite(da_row)) || da_row[[2]] <= 0 || da_row[[4]] < 0 || da_row[[4]] > 1) {
+-    da_result[da_j, "status"] <- "failed"
+-    da_result[da_j, "note"] <- paste(c("the fit returned a non-finite or zero standard error, so there is no test (the residual variance is zero)",
++    da_result[da_j, "note"] <- paste(c("the test returned a non-finite statistic or a zero standard error, so there is nothing to report",
+                                        unique(da_warns)), collapse = "; ")
+     next
+   }
+-  da_result[da_j, c("estimate", "se", "statistic", "pvalue")] <- unname(da_row[1:4])
++  da_result[da_j, c("estimate", "se", "statistic", "pvalue", "df")] <-
++    c(da_est, da_se, da_stat, da_p, da_df)
+   if (length(da_warns) > 0L) {
+     da_result[da_j, "note"] <- paste("R warned:", paste(unique(da_warns), collapse = "; "))
+   }
+@@ -397,18 +418,19 @@ for (da_j in seq_len(da_n)) {
+ """
+ 
+ """
+-    fit_lm(values, groups; levels) -> DataFrame
++    fit_welch(values, groups; levels) -> DataFrame
+ 
+-Fit `stats::lm(y ~ group)` to each column of the samples x taxa matrix
+-`values` (for `clr_lm`, centred log-ratios). `levels` is
++Test each column of the samples x taxa matrix `values` (for `clr_lm`, centred
++log-ratios) with `stats::t.test(x, y, var.equal = FALSE)`. `levels` is
+ `(reference, contrast)`, so the estimate is the mean of `contrast` minus the
+-mean of `reference`, and the test is the two-sample t-test with pooled
+-variance. Returns one row per taxon with `status` (`ok` or `failed`), `note`,
+-`estimate`, `se`, `statistic` (t) and `pvalue`; a failed taxon has `nothing`
+-for every statistic. Throws `RBusyError` when the R runtime stays busy.
+-"""
+-function fit_lm(values::AbstractMatrix{<:Real}, groups::AbstractVector{<:AbstractString};
+-                levels::NTuple{2,String})
++mean of `reference`, and the test is Welch's: each group keeps its own variance
++and the degrees of freedom are Welch and Satterthwaite's rather than `n - 2`.
++Returns one row per taxon with `status` (`ok` or `failed`), `note`, `estimate`,
++`se`, `statistic` (t), `pvalue` and `df`; a failed taxon has `nothing` for every
++statistic. Throws `RBusyError` when the R runtime stays busy.
++"""
++function fit_welch(values::AbstractMatrix{<:Real}, groups::AbstractVector{<:AbstractString};
++                   levels::NTuple{2,String})
+     size(values, 1) == length(groups) || throw(ArgumentError(
+         "values have $(size(values, 1)) samples and groups $(length(groups))"))
+     raw = with_r_lock(; timeout=R_WAIT_SECONDS[]) do
+@@ -416,12 +438,13 @@ function fit_lm(values::AbstractMatrix{<:Real}, groups::AbstractVector{<:Abstrac
+         RCall.globalEnv[:da_group] = String.(groups)
+         RCall.globalEnv[:da_levels] = collect(levels)
+         try
+-            RCall.reval(_FIT_LM_R)
++            RCall.reval(_FIT_WELCH_R)
+             DataFrame(RCall.rcopy(RCall.reval("da_result")))
+         finally
+             RCall.reval("rm(list = intersect(ls(), c('da_values', 'da_group', 'da_levels', " *
+-                        "'da_g', 'da_term', 'da_n', 'da_result', 'da_j', 'da_y', 'da_warns', " *
+-                        "'da_co', 'da_row'))); invisible(gc())")
++                        "'da_g', 'da_a', 'da_b', 'da_n', 'da_result', 'da_j', 'da_y', " *
++                        "'da_warns', 'da_fit', 'da_est', 'da_stat', 'da_df', 'da_p', " *
++                        "'da_se'))); invisible(gc())")
+         end
+     end
+     DataFrame(status    = String.(raw.status),
+@@ -429,7 +452,8 @@ function fit_lm(values::AbstractMatrix{<:Real}, groups::AbstractVector{<:Abstrac
+               estimate  = _num.(raw.estimate),
+               se        = _num.(raw.se),
+               statistic = _num.(raw.statistic),
+-              pvalue    = _num.(raw.pvalue))
++              pvalue    = _num.(raw.pvalue),
++              df        = _num.(raw.df))
+ end
+ 
+ """
+@@ -442,7 +466,7 @@ _row(taxon, prevalence, note) = Dict{String,Any}(
+     "estimate" => nothing, "log2_fold_change" => nothing,
+     "standard_error" => nothing, "statistic" => nothing,
+     "pvalue" => nothing, "padj" => nothing, "dispersion_theta" => nothing,
+-    "prevalence" => prevalence)
++    "df" => nothing, "prevalence" => prevalence)
+ 
+ """
+     differential_abundance(counts, samples, taxa, groups; reference, contrast,
+@@ -457,17 +481,25 @@ enter each negative-binomial model as `log(factor)`; the estimate is a
+ natural-log fold change.
+ 
+ `clr_lm`, in this order: (1) taxa with no reads in any of the samples are set
+-aside, because a taxon never observed has no detection limit and is not part of
+-the composition; (2) the zeros of the remaining taxa are replaced
+-multiplicatively with `config.replacement_delta`; (3) each sample is
+-transformed to centred log-ratios over all of those taxa; (4) only then is
+-`min_prevalence` applied, choosing which taxa are tested. Filtering before the
+-transform would change every sample's geometric mean and so every other
+-taxon's value. The estimate is the difference in mean CLR, contrast minus
+-reference: a difference in centred-log-ratio units, not a fold change, and it
+-is relative to the geometric mean of the observed taxa. Replaced zeros are not
++aside, because a taxon never observed has no observed proportion to cap a
++replacement against and is not part of the composition; (2) `min_prevalence`
++chooses the taxa that will be tested; (3) the zeros of *those* taxa are replaced
++multiplicatively with `config.replacement_delta`, by
++`zCompositions::cmultRepl`; (4) each sample is transformed to centred
++log-ratios over exactly those taxa; (5) each taxon is tested with Welch's two
++sample t test. The filter runs before the replacement deliberately: replacing
++over every taxon first and filtering after imputes into taxa that are then
++discarded, and on a shallow library the imputed values can hold more of the
++sample's total than its reads do, which would leave a composition of little else
++and make each surviving value a function of how many taxa were dropped after the
++transform. The estimate is the difference in mean CLR, contrast minus reference:
++a difference in centred-log-ratio units, not a fold change, and it is relative to
++the geometric mean of the taxa in the composition. Welch rather than pooled
++because the groups of a study differ in size and in spread; with equal sizes the
++standard errors agree and the degrees of freedom do not. Replaced zeros are not
+ measurements, so a taxon with many zeros carries an estimate that depends on
+-`replacement_delta`.
++`replacement_delta`, and `diagnostics.zero_replacement` says how much of each
++sample they hold.
+ 
+ For both methods, taxa present in fewer than `config.min_prevalence` of the
+ samples are reported as `filtered` and not fitted, and the Benjamini-Hochberg
+@@ -536,31 +568,42 @@ function differential_abundance(counts::AbstractMatrix{<:Real},
+         config_echo = Dict{String,Any}("method" => config.method, "offset" => config.offset,
+                                        "min_prevalence" => config.min_prevalence)
+     else
+-        observed = findall(>(0), present)
+-        for j in setdiff(axes(counts, 2), observed)
+-            rows[j]["note"] = "no reads in any sample of either group, so it has no " *
+-                              "detection limit and is not part of the composition"
++        # `clr_lm`, in this order: taxa with no reads anywhere are not part of the
++        # composition; `min_prevalence` then chooses which taxa are tested; and
++        # only then are the zeros replaced, over that table. Replacing first and
++        # filtering after would impute into every taxon the sequencing happened to
++        # see, which on a shallow library is mostly zeros: the imputed values can
++        # then hold more of the sample than the reads it has, and the CLR of the
++        # survivor is a function of how many taxa were thrown away afterwards.
++        kept = findall(j -> present[j] > 0 && prevalence[j] >= config.min_prevalence)
++        for j in setdiff(axes(counts, 2), kept)
++            present[j] == 0 && (rows[j]["note"] =
++                "no reads in any sample of either group, so it has no observed proportion to " *
++                "cap a replacement against, and it is not part of the composition")
+         end
+-        length(observed) >= 2 || throw(ArgumentError(
+-            "the centred log-ratio needs at least 2 taxa with reads; there are $(length(observed))"))
+-        replaced = multiplicative_replacement(counts[:, observed];
++        length(kept) >= 2 || throw(ArgumentError(
++            "the centred log-ratio needs at least 2 taxa with reads at or above " *
++            "analysis.differential.min_prevalence = $(config.min_prevalence); there are $(length(kept))"))
++        (n_ref >= 2 && n_con >= 2) || throw(ArgumentError(
++            "Welch's t test needs a variance in each of them: at least 2 samples per group, " *
++            "and '$reference' has $n_ref and '$contrast' has $n_con"))
++        replaced = multiplicative_replacement(counts[:, kept];
+                                               delta=config.replacement_delta,
+-                                              samples, taxa=taxa[observed])
+-        clr = clr_transform(replaced.counts)
+-        tested = findall(k -> prevalence[observed[k]] >= config.min_prevalence, eachindex(observed))
+-        fits = isempty(tested) ? nothing : fit_lm(clr[:, tested], groups; levels)
+-        if !isnothing(fits)
+-            for (k, c) in enumerate(tested)
+-                f = fits[k, :]
+-                merge!(rows[observed[c]], Dict{String,Any}(
+-                    "status" => f.status, "note" => f.note, "estimate" => f.estimate,
+-                    "standard_error" => f.se, "statistic" => f.statistic,
+-                    "pvalue" => f.pvalue))
+-            end
++                                              threshold=DETECTION_THRESHOLD,
++                                              samples, taxa=taxa[kept])
++        clr = clr_transform(replaced.values)
++        fits = fit_welch(clr, groups; levels)
++        for (k, j) in enumerate(kept)
++            f = fits[k, :]
++            merge!(rows[j], Dict{String,Any}(
++                "status" => f.status, "note" => f.note, "estimate" => f.estimate,
++                "standard_error" => f.se, "statistic" => f.statistic,
++                "pvalue" => f.pvalue, "df" => f.df))
+         end
+-        method_text = "Gaussian linear model per taxon (stats::lm) on centred log-ratios, after " *
+-                      "multiplicative replacement of zeros (delta = $(config.replacement_delta) of " *
+-                      "each taxon's smallest observed count); t test of the group coefficient; " *
++        method_text = "Welch's t test per taxon (stats::t.test with var.equal = FALSE) on centred " *
++                      "log-ratios, after multiplicative replacement of the zeros with " *
++                      "zCompositions::cmultRepl (delta = $(config.replacement_delta) of each zero's " *
++                      "replacement limit, each taxon capped at its smallest observed proportion); " *
+                       "Benjamini-Hochberg adjustment over the fitted taxa. Estimates are " *
+                       "differences in CLR units, not fold changes, and replaced zeros are not measurements"
+         effect = Dict("key" => "estimate", "label" => "CLR difference")
+@@ -569,10 +612,16 @@ function differential_abundance(counts::AbstractMatrix{<:Real},
+                                        "min_prevalence" => config.min_prevalence,
+                                        "replacement_delta" => config.replacement_delta)
+         diagnostics["zero_replacement"] = Dict{String,Any}(
+-            "delta" => replaced.delta, "zeros_replaced" => replaced.zeros_replaced,
+-            "n_taxa_in_composition" => length(observed),
+-            "n_taxa_unobserved" => length(taxa) - length(observed),
+-            "max_imputed_fraction" => maximum(replaced.imputed_mass))
++            "operator" => REPLACEMENT_METHOD,
++            "delta" => replaced.delta, "threshold" => replaced.threshold,
++            "zeros_replaced" => replaced.zeros_replaced,
++            "n_samples_replaced" => count(>(0), replaced.imputed_mass),
++            "n_taxa_in_composition" => length(kept),
++            "n_taxa_excluded" => count(>(0), present) - length(kept),
++            "n_taxa_unobserved" => length(taxa) - count(>(0), present),
++            "max_imputed_fraction" => maximum(replaced.imputed_mass),
++            "median_imputed_fraction" => _median(replaced.imputed_mass))
++        diagnostics["fit_method"] = "stats::t.test (Welch, var.equal = FALSE)"
+     end
+ 
+     family = findall(r -> r["status"] in ("ok", "boundary") && !isnothing(r["pvalue"]), rows)
+diff --git a/src/analysis/zero_replacement.jl b/src/analysis/zero_replacement.jl
+index 3ca7f7f..291bb7a 100644
+--- a/src/analysis/zero_replacement.jl
++++ b/src/analysis/zero_replacement.jl
+@@ -2,47 +2,91 @@
+ # SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell (hyperpolymath) <j.d.a.jewell@open.ac.uk>
+ 
+ ## Zero replacement for compositional transforms
+-# Multiplicative replacement (Martín-Fernández, Barceló-Vidal & Pawlowsky-Glahn
+-# 2003, Mathematical Geology 35(3):253-278), the operator of
+-# `zCompositions::multRepl` with `frac = delta` and a per-taxon detection limit.
+-# A log-ratio transform is undefined at zero, so a zero has to be given some
+-# positive value first; this operator does that while keeping each sample's
+-# total and the ratios among its observed taxa exactly as they were, which a
+-# pseudocount does not.
++# Zeros are replaced by `zCompositions::cmultRepl` (Martín-Fernández,
++# Barceló-Vidal & Pawlowsky-Glahn 2003, Mathematical Geology 35(3):253-278),
++# called through RCall on the integer read counts. A log-ratio transform is
++# undefined at zero, so a zero has to be given some positive value first;
++# multiplicative replacement does that while keeping each sample's total and the
++# ratios among its observed taxa exactly as they were, which a pseudocount does
++# not.
++#
++# The operator is the package's, not a reimplementation of it: `method = "CZM"`
++# is `cmultRepl`'s count-data rule, which puts `frac * threshold / n_i` in each
++# zero of sample `i` (`n_i` the sample's read total, `threshold` the fraction of
++# it that counts as detectable) and caps that at `frac` times the taxon's
++# smallest observed proportion when `adjust = TRUE`. Keeping the invariant in
++# the package rather than here is the point: `renv.lock` pins the version, so
++# the numbers a run produced are reproducible against a citable implementation.
+ #
+ # Matrices here are samples x taxa, as everywhere else in `Analysis` (the
+ # reference and the original paper write compositions as rows too).
+ #
+ # A replaced value is not a measurement. The replacement is biased, and no rule
+-# that sees only the observed data can avoid that; the result records it.
++# that sees only the observed data can avoid that; the result records how much of
++# each sample's total the imputed values hold, and the caller refuses rather
++# than return a composition made mostly of them.
+ module ZeroReplacement
+ 
+-export DEFAULT_DELTA, ReplacementOutcome, multiplicative_replacement,
+-       replacement_invariants_hold
++using RCall
++
++using ..RRuntime: with_r_lock
++using ..Analysis: R_WAIT_SECONDS
++
++export DEFAULT_DELTA, DETECTION_THRESHOLD, REPLACEMENT_METHOD, ReplacementOutcome,
++       ZCompositionsUnavailable, multiplicative_replacement, replacement_invariants_hold
+ 
+ """
+     DEFAULT_DELTA
+ 
+-The fraction of a taxon's detection limit that a replaced zero receives by
+-default, 0.65, as in `zCompositions::multRepl` and the original paper.
++The fraction of a zero's replacement limit that the zero receives by default,
++0.65, as in `zCompositions::cmultRepl` and the original paper.
+ """
+ const DEFAULT_DELTA = 0.65
+ 
++"""
++    DETECTION_THRESHOLD
++
++`cmultRepl`'s `threshold`, 0.5: a taxon with `threshold * 100` percent or fewer
++of a sample's reads is treated as being at the detection limit, and its
++replacement is scaled by the sample's total (`threshold / n_i`).
++"""
++const DETECTION_THRESHOLD = 0.5
++
++# Named in the diagnostics, so a run records which operator produced it.
++const REPLACEMENT_METHOD = "zCompositions::cmultRepl"
++
+ # Relative tolerance of the runtime invariant checks.
+ const TOLERANCE = 1e-9
+ 
++"""
++    ZCompositionsUnavailable
++
++`cmultRepl` could not be loaded in the embedded R session. Replacement is not
++optional for a compositional transform and there is no cheaper stand-in, so the
++analysis stops with this instead of returning something.
++"""
++struct ZCompositionsUnavailable <: Exception
++    detail :: String
++end
++
++Base.showerror(io::IO, e::ZCompositionsUnavailable) = print(io,
++    "zCompositions is not available to the embedded R session, and zero " *
++    "replacement is defined by its cmultRepl: add it to the project with " *
++    "renv::install(\"zCompositions\") so it is pinned in renv.lock. " *
++    "($(e.detail))")
++
+ """
+     ReplacementOutcome
+ 
+-The result of `multiplicative_replacement`: the replaced samples x taxa table,
+-the `delta` used, the per-taxon `detection_limits`, the number of
+-`zeros_replaced`, and `imputed_mass`, the fraction of each sample's total now
+-held by replaced values.
++The result of `multiplicative_replacement`: the replaced samples x taxa table of
++proportions (rows sum to 1), the `delta` and `threshold` used, the number of
++zeros replaced, and `imputed_mass`, the fraction of each sample's total now held
++by replaced values.
+ """
+ struct ReplacementOutcome
+-    counts           :: Matrix{Float64}
++    values           :: Matrix{Float64}
+     delta            :: Float64
+-    detection_limits :: Vector{Float64}
++    threshold        :: Float64
+     zeros_replaced   :: Int
+     imputed_mass     :: Vector{Float64}
+ end
+@@ -53,7 +97,7 @@ end
+ The first way in which `replaced` fails to be a multiplicative replacement of
+ `original`, as a sentence, or `nothing` when it is one: same shape, every
+ sample total preserved, every observed taxon in a sample scaled by the same
+-factor, and no zero left.
++factor, and no zero left. Both tables are proportions of the sample.
+ """
+ function _invariant_violation(original::AbstractMatrix{<:Real}, replaced::AbstractMatrix{<:Real})
+     size(original) == size(replaced) ||
+@@ -88,81 +132,170 @@ taxa of each sample by one common factor, and leaves no zero.
+ replacement_invariants_hold(original::AbstractMatrix{<:Real}, replaced::AbstractMatrix{<:Real}) =
+     isnothing(_invariant_violation(original, replaced))
+ 
++# One call to cmultRepl over the whole table. `z.warning = 1` with
++# `z.delete = FALSE` keeps the package from deleting or complaining about a
++# column or row because it is mostly zeros: which taxa are in the composition is
++# `min_prevalence`'s business, not the replacement operator's, and a sample that
++# shallow has to be refused loudly rather than trimmed quietly. `suppress.print`
++# keeps the "No. adjusted imputations" message out of the job log, and
++# `output = "prop"` returns proportions of the whole total, which is what makes
++# `imputed_mass` a fraction of the sample.
++const _REPLACE_R = raw"""
++da_zr_out <- as.matrix(zCompositions::cmultRepl(
++  as.data.frame(da_zr_x), label = 0, method = "CZM", output = "prop",
++  frac = da_zr_delta, threshold = da_zr_threshold, adjust = TRUE,
++  z.warning = 1, z.delete = FALSE, suppress.print = TRUE))
++"""
++
+ """
+-    multiplicative_replacement(counts; delta=DEFAULT_DELTA, samples, taxa) -> ReplacementOutcome
++    _limits(X, threshold) -> (row_totals, colmin)
+ 
+-Replace the zeros of the samples x taxa table `counts`. With `DL_j` the
+-detection limit of taxon `j` (its smallest observed value anywhere in the
+-table), `S_i` the total of sample `i`, `Z_i` its zero taxa and
+-`Δ_i = Σ_{j ∈ Z_i} delta·DL_j / S_i`:
++The two quantities `cmultRepl` needs to decide a replacement, computed on the
++same table so the refusal below can be checked without R: each sample's read
++total, and for each taxon the smallest proportion any sample has of it.
++"""
++function _limits(X::AbstractMatrix{Float64}, threshold::Real)
++    totals = [sum(view(X, i, :)) for i in axes(X, 1)]
++    colmin = fill(Inf, size(X, 2))
++    for j in axes(X, 2)
++        for i in axes(X, 1)
++            X[i, j] > 0 && (colmin[j] = min(colmin[j], X[i, j] / totals[i]))
++        end
++    end
++    totals, colmin
++end
++
++"""
++    multiplicative_replacement(counts; delta=DEFAULT_DELTA,
++                               threshold=DETECTION_THRESHOLD, samples, taxa)
++                              -> ReplacementOutcome
++
++Replace the zeros of the samples x taxa read-count table `counts` with
++`zCompositions::cmultRepl(X, label = 0, method = "CZM", output = "prop", frac =
++delta, threshold = threshold, adjust = TRUE)`, and return the proportions it
++gives. For sample `i` with `n_i` reads, a zero in taxon `j` receives
+ 
+-    x̃_ij = delta · DL_j        for j ∈ Z_i
+-    x̃_ij = (1 - Δ_i) · x_ij    otherwise
++    delta * min(threshold / n_i, c_j)
+ 
+-Each sample total and the ratios among each sample's observed taxa are kept
+-exactly; every replaced value is positive and below its taxon's detection
+-limit. On a table of proportions this equals `zCompositions::multRepl(X,
+-label = 0, dl, frac = delta)`; on counts with unequal totals, dividing each row
+-by its total gives the reference's output.
++with `c_j` taxon `j`'s smallest observed proportion anywhere in the table; that
++is `cmultRepl`'s rule with `adjust = TRUE`, and it is what caps a rare taxon
++below the abundant ones instead of inflating it past them. Every other taxon of
++the sample is then scaled by `1 - Σ` of those replacements, which keeps the
++sample's total and the ratios among its observed taxa.
+ 
+-`samples` and `taxa` name rows and columns in error messages. Throws
+-`ArgumentError` when `delta` is not in (0, 1), when a value is negative or not
+-finite, when a taxon is never observed (its detection limit cannot be
+-estimated), when a sample has no reads, or when a sample's replaced values
+-would take its whole total (`Δ_i ≥ 1`); that message gives the largest
+-`delta` the sample admits.
++`samples` and `taxa` name rows and columns in error messages. The table is
++validated here, before R sees it: a count matrix, at least 2 samples, no
++taxon absent from every sample. Two things are refused that `cmultRepl`
++tolerates, because a compositional transform cannot use the result either way:
++a sample whose replaced values would hold its whole total (`imputed_mass ≥ 1`,
++which is where the observed entries go to zero or negative), and any output
++that breaks the invariants above. A sample with no zeros is passed through
++untouched, and if no sample has a zero at all R is not called: `label = 0`
++makes `cmultRepl` refuse a table with no zero in it.
++
++Throws `ArgumentError` when `delta` is not in (0, 1) or a value is not a
++non-negative integer count, `ZCompositionsUnavailable` when the package cannot
++be loaded, and an `ErrorException` when the replacement breaks an invariant.
+ """
+ function multiplicative_replacement(counts::AbstractMatrix{<:Real};
+                                     delta::Real=DEFAULT_DELTA,
++                                    threshold::Real=DETECTION_THRESHOLD,
+                                     samples::AbstractVector{<:AbstractString}=["sample $i" for i in axes(counts, 1)],
+                                     taxa::AbstractVector{<:AbstractString}=["taxon $j" for j in axes(counts, 2)])
+     δ = Float64(delta)
+     0 < δ < 1 || throw(ArgumentError(
+         "the replacement delta must be in (0, 1), not $delta: it is the fraction of a " *
+-        "taxon's detection limit that a replaced zero receives (0.65 is the published default)"))
++        "zero's replacement limit that the zero receives (0.65 is the published default)"))
++    0 < threshold <= 1 || throw(ArgumentError(
++        "the detection threshold must be in (0, 1], not $threshold (0.5 is " *
++        "zCompositions' default: half a sample's reads)"))
+     size(counts) == (length(samples), length(taxa)) || throw(ArgumentError(
+         "the table is $(size(counts)) but there are $(length(samples)) samples and $(length(taxa)) taxa"))
++    size(counts, 1) >= 2 || throw(ArgumentError(
++        "zero replacement needs at least 2 samples: a replacement is scaled " *
++        "against what the other samples show for each taxon"))
+     X = Matrix{Float64}(counts)
+     for j in axes(X, 2), i in axes(X, 1)
+-        (isfinite(X[i, j]) && X[i, j] >= 0) || throw(ArgumentError(
++        (isfinite(X[i, j]) && X[i, j] >= 0 && X[i, j] == round(X[i, j])) || throw(ArgumentError(
+             "the value for taxon '$(taxa[j])' in sample '$(samples[i])' is $(X[i, j]); " *
+-            "zero replacement needs non-negative finite values"))
++            "cmultRepl's count-data replacement is defined on non-negative integer read counts"))
+     end
+-
+-    dl = Vector{Float64}(undef, size(X, 2))
+     for j in axes(X, 2)
+-        observed = filter(>(0), view(X, :, j))
+-        isempty(observed) && throw(ArgumentError(
+-            "taxon '$(taxa[j])' has no reads in any sample, so its detection limit " *
+-            "cannot be estimated from this table"))
+-        dl[j] = minimum(observed)
++        any(>(0), view(X, :, j)) || throw(ArgumentError(
++            "taxon '$(taxa[j])' has no reads in any sample, so it has no observed proportion to " *
++            "cap a replacement against and nothing to compare: exclude it before the transform"))
+     end
+ 
+-    out = copy(X)
++    totals, colmin = _limits(X, threshold)
++    zeros_i = [findall(==(0), view(X, i, :)) for i in axes(X, 1)]
++    n_zero = sum(length, zeros_i)
++
++    # What the imputation would take from each sample, computed the same way the
++    # package does it, so a composition that would be swallowed by its own
++    # imputed values is refused with numbers rather than returned. cmultRepl
++    # itself does not refuse: it scales the observed entries by 1 - Σ, which at
++    # Σ >= 1 sends them to zero or negative.
+     mass = zeros(Float64, size(X, 1))
+-    n_zero = 0
++    bound = zeros(Float64, size(X, 1))
+     for i in axes(X, 1)
+-        total = sum(view(X, i, :))
+-        total > 0 || throw(ArgumentError("sample '$(samples[i])' has no reads"))
+-        zeros_i = findall(==(0), view(X, i, :))
+-        isempty(zeros_i) && continue
+-        limit = sum(dl[zeros_i])
+-        Δ = δ * limit / total
+-        Δ < 1 || throw(ArgumentError(
+-            "sample '$(samples[i])' has $(length(zeros_i)) zeros whose detection limits sum " *
+-            "to $limit against a total of $total, so delta = $δ would give replaced values " *
+-            "$(round(100Δ; digits=1))% of the sample. The largest delta this sample admits " *
+-            "is below $(total / limit); lower delta or raise min_prevalence"))
+-        for j in axes(X, 2)
+-            out[i, j] = X[i, j] == 0 ? δ * dl[j] : (1 - Δ) * X[i, j]
++        isempty(zeros_i[i]) && continue
++        # cmultRepl's own arithmetic: the value a zero gets is δ·threshold/n_i,
++        # lowered to δ·c_j when that overshoots the taxon's smallest observed
++        # proportion c_j. The cap is compared against the *scaled* value, not
++        # against threshold/n_i, which matters at small δ: it is what makes the
++        # sum grow a little faster than δ·Σ min(threshold/n_i, c_j) would say.
++        u = δ * Float64(threshold) / totals[i]
++        mass[i] = sum(j -> u > colmin[j] ? δ * colmin[j] : u, zeros_i[i])
++        # The delta at which this row's replacements would come to exactly its
++        # whole total. Rescaling the delta rescales every replacement that is not
++        # capped and shrinks the capped ones, so the sum can only grow slower than
++        # linearly and δ / mass is an upper bound on the delta that still fits.
++        # Rounded *up* to three figures, so what the sentence claims is true.
++        bound[i] = ceil((δ / mass[i]) * 1000) / 1000
++        mass[i] < 1 || throw(ArgumentError(
++            "sample '$(samples[i])' has $(length(zeros_i[i])) zeros whose replacements at " *
++            "delta = $δ would hold $(round(100 * mass[i]; digits=1))% of its total, leaving " *
++            "nothing for the taxa it does have. The largest delta that can still work is " *
++            "below $(bound[i]). Raise analysis.differential.min_prevalence, " *
++            "so that the composition being replaced over is the one the test is run on, or " *
++            "lower analysis.differential.replacement_delta to take the zeros one tier at a time."))
++    end
++
++    closed = [X[i, j] / totals[i] for i in axes(X, 1), j in axes(X, 2)]
++    out = if n_zero == 0
++        closed
++    else
++        with_r_lock(; timeout=R_WAIT_SECONDS[]) do
++            RCall.rcopy(RCall.reval("requireNamespace('zCompositions', quietly = TRUE)")) ||
++                throw(ZCompositionsUnavailable("cmultRepl is not in the project library"))
++            RCall.globalEnv[:da_zr_x] = X
++            RCall.globalEnv[:da_zr_delta] = δ
++            RCall.globalEnv[:da_zr_threshold] = Float64(threshold)
++            try
++                RCall.reval(_REPLACE_R)
++                Matrix{Float64}(RCall.rcopy(RCall.reval("da_zr_out")))
++            catch err
++                throw(ArgumentError(
++                    "zCompositions::cmultRepl refused the table: $(sprint(showerror, err))"))
++            finally
++                RCall.reval("rm(list = intersect(ls(), c('da_zr_x', 'da_zr_delta', " *
++                            "'da_zr_threshold', 'da_zr_out'))); invisible(gc())")
++            end
+         end
+-        mass[i] = Δ
+-        n_zero += length(zeros_i)
+     end
+ 
+-    problem = _invariant_violation(X, out)
+-    isnothing(problem) || error("multiplicative replacement broke its own invariant: $problem")
+-    ReplacementOutcome(out, δ, dl, n_zero, mass)
++    size(out) == size(X) || error("$REPLACEMENT_METHOD returned a $(size(out)) table for an input of $(size(X))")
++    for i in axes(out, 1)
++        for j in axes(out, 2)
++            (isfinite(out[i, j]) && out[i, j] > 0) || error(
++                "$REPLACEMENT_METHOD left $(out[i, j]) for taxon $(taxa[j]) in sample $(samples[i]): " *
++                "the replacement this sample needs is larger than the sample")
++        end
++        mass[i] = sum(view(out, i, zeros_i[i]))   # what the imputed values hold, from R's own numbers
++    end
++    problem = _invariant_violation(closed, out)
++    isnothing(problem) || error("$REPLACEMENT_METHOD broke the replacement invariants: $problem")
++    ReplacementOutcome(out, δ, Float64(threshold), n_zero, mass)
+ end
+ 
+ end # module ZeroReplacement
+diff --git a/src/server/routes/analysis.jl b/src/server/routes/analysis.jl
+index fdd529b..67292dc 100644
+--- a/src/server/routes/analysis.jl
++++ b/src/server/routes/analysis.jl
+@@ -13,6 +13,7 @@ using ..Analysis: alpha_chart,
+                              pool_columns, auto_min_depth, bar_chart, faceted_bar_chart,
+                              natural_sort
+ using ..Categories, ..CompositionLibrary
++using ..ZeroReplacement: ZCompositionsUnavailable
+ 
+ function _validate_run_request(study::String, run::String)
+     study in _study_names() || return json_error(404, "study_not_found", "Study '$study' not found")
+@@ -1201,7 +1202,7 @@ function _differential_config(study::String)
+     resolved = _resolved_run_config(study, nothing, nothing, nothing)
+     val(k, d) = something(get(get(resolved, k, (; value=d)), :value, d), d)
+     DifferentialConfig(String(val("analysis.differential.offset", "tss")),
+-                       Float64(val("analysis.differential.min_prevalence", 0.0));
++                       Float64(val("analysis.differential.min_prevalence", 0.25));
+                        method=String(val("analysis.differential.method", "nb_glm")),
+                        replacement_delta=Float64(val("analysis.differential.replacement_delta", 0.65)))
+ end
+@@ -1281,6 +1282,8 @@ function _differential(study::String, body)
+         e isa ArgumentError    && return json_error(400, "invalid_input", sprint(showerror, e))
+         e isa ScalingRefusal   && return json_error(422, "scaling_refused", sprint(showerror, e))
+         e isa MASSUnavailable  && return json_error(503, "r_unavailable", sprint(showerror, e))
++        e isa ZCompositionsUnavailable &&
++            return json_error(503, "r_unavailable", sprint(showerror, e))
+         e isa ErrorException   && return json_error(422, "no_taxon_fitted", e.msg)
+         rethrow()
+     end
+diff --git a/test/unit/test_differential.jl b/test/unit/test_differential.jl
+index b2eee27..d4ace54 100644
+--- a/test/unit/test_differential.jl
++++ b/test/unit/test_differential.jl
+@@ -3,10 +3,15 @@
+ #
+ # Differential abundance: Benjamini-Hochberg, TSS/RLE size factors, input
+ # validation, and the negative-binomial fit checked against a direct
+-# MASS::glm.nb call. Tests needing R or MASS skip loudly when either is absent.
++# MASS::glm.nb call. The clr_lm tests check the replacement against
++# zCompositions::cmultRepl and the per-taxon test against a direct
++# stats::t.test(..., var.equal = FALSE), and they check that the prevalence
++# filter runs before the replacement rather than after it. Tests needing R,
++# MASS or zCompositions skip loudly when any of them is absent.
+ 
+ using MetaManifold
+ using MetaManifold.Differential
++using MetaManifold.ZeroReplacement: DEFAULT_DELTA, DETECTION_THRESHOLD, multiplicative_replacement
+ using RCall
+ using Test
+ using DuckDB, DBInterface, JSON3
+@@ -26,6 +31,7 @@ function _r_has(pkg::AbstractString)
+ end
+ 
+ const HAVE_R = _r_has("stats")
++const HAVE_ZC = HAVE_R && _r_has("zCompositions")
+ const HAVE_MASS = HAVE_R && _r_has("MASS")
+ HAVE_MASS || @info "R or MASS unavailable - the negative-binomial fit tests are SKIPPED"
+ 
+@@ -327,7 +333,7 @@ end
+ 
+     clr_config = DifferentialConfig(; method="clr_lm")
+ 
+-    @testset "CLR linear model: estimate is the difference of group mean CLRs" begin
++    @testset "clr_lm: Welch's t test on the group mean CLRs" begin
+         if !HAVE_R
+             @test_skip false
+         else
+@@ -337,68 +343,320 @@ end
+             @test isempty(res["size_factors"])
+             @test res["config"]["method"] == "clr_lm" && !haskey(res["config"], "offset")
+             @test res["diagnostics"]["zero_replacement"]["zeros_replaced"] == 0
+-            # Known answer, independent of R: with a two-level factor, the lm
+-            # coefficient is mean(B) - mean(A) of each taxon's CLR.
++            @test occursin("Welch", res["method"]) && occursin("var.equal = FALSE", res["method"])
++            @test res["diagnostics"]["fit_method"] == "stats::t.test (Welch, var.equal = FALSE)"
++            @test res["diagnostics"]["zero_replacement"]["operator"] == "zCompositions::cmultRepl"
++            # Known answer, independent of R: for a two-level comparison the
++            # estimate is mean(B) minus mean(A) of each taxon's CLR, whichever
++            # test is then used to judge it.
+             z = clr_transform(Float64.(effect))
+             a = effect_groups .== "A"; b = .!a
+             expected = vec(sum(z[b, :]; dims=1)) ./ count(b) .- vec(sum(z[a, :]; dims=1)) ./ count(a)
+             byt = Dict(r["taxon"] => r for r in res["rows"])
+             for (j, t) in enumerate(effect_taxa)
+-                @test byt[t]["status"] == "ok"
++                @test byt[t]["status"] == "ok" && byt[t]["note"] == ""
+                 @test byt[t]["estimate"] ≈ expected[j] rtol=1e-8
+                 @test isnothing(byt[t]["log2_fold_change"]) && isnothing(byt[t]["dispersion_theta"])
+                 @test 0 <= byt[t]["pvalue"] <= 1 && !isnothing(byt[t]["padj"])
++                @test !isnothing(byt[t]["df"])
+             end
+             @test byt["t_up"]["estimate"] > 0 && byt["t_down"]["estimate"] < 0
+             @test byt["t_up"]["padj"] < 0.05 && byt["t_down"]["padj"] < 0.05
+-            @testset "matches a direct stats::lm call" begin
++            @test byt["t_flat"]["padj"] > 0.05
++
++            @testset "matches a direct stats::t.test call" begin
+                 y = z[:, 1]; g = effect_groups
+                 direct = rcopy(R"""
+-                    fit <- summary(stats::lm($y ~ factor($g, levels = c("A", "B"))))
+-                    unname(fit$coefficients[2, c(1, 2, 4)])
++                    local({
++                      v <- $y; grp <- $g
++                      fit <- stats::t.test(v[grp == "B"], v[grp == "A"], var.equal = FALSE)
++                      c(unname(fit$estimate[1] - fit$estimate[2]), unname(fit$statistic),
++                        fit$p.value, unname(fit$parameter))
++                    })
+                 """)
+                 @test byt["t_up"]["estimate"] ≈ direct[1] rtol=1e-10
+-                @test byt["t_up"]["standard_error"] ≈ direct[2] rtol=1e-10
++                @test byt["t_up"]["statistic"] ≈ direct[2] rtol=1e-10
+                 @test byt["t_up"]["pvalue"] ≈ direct[3] rtol=1e-8
++                @test byt["t_up"]["df"] ≈ direct[4] rtol=1e-10
++                # t.test reports the interval rather than the standard error, so
++                # the standard error reported here has to give the statistic
++                # back when it is divided into the estimate.
++                @test byt["t_up"]["estimate"] / byt["t_up"]["standard_error"] ≈ direct[2] rtol=1e-8
++                # The df are Welch and Satterthwaite's. Equal group sizes make the
++                # standard error the pooled one, but not the df, and these are
++                # below n - 2 because the two groups vary by different amounts.
++                v1 = y[g .== "A"]; v2 = y[g .== "B"]
++                w1 = sum((v1 .- mean(v1)) .^ 2) / (length(v1) - 1) / length(v1)
++                w2 = sum((v2 .- mean(v2)) .^ 2) / (length(v2) - 1) / length(v2)
++                @test direct[4] ≈ (w1 + w2)^2 / (w1^2 / (length(v1) - 1) + w2^2 / (length(v2) - 1)) rtol=1e-9
++                @test direct[4] < length(effect_groups) - 2
++                @test byt["t_up"]["df"] ≈ 21.773496214508405 rtol=1e-9
++            end
++
++            @testset "every taxon's fit matches t.test, not just the first" begin
++                for (j, t) in enumerate(effect_taxa)
++                    want = rcopy(R"""
++                        local({
++                          v <- $(z[:, j]); grp <- $effect_groups
++                          fit <- stats::t.test(v[grp == "B"], v[grp == "A"], var.equal = FALSE)
++                          c(fit$p.value, unname(fit$parameter))
++                        })
++                    """)
++                    @test byt[t]["pvalue"] ≈ want[1] rtol=1e-8
++                    @test byt[t]["df"] ≈ want[2] rtol=1e-9
++                end
+             end
+         end
+     end
+ 
+-    @testset "CLR: zeros, unobserved taxa and prevalence" begin
++    @testset "clr_lm: the prevalence filter runs before the replacement" begin
+         if !HAVE_R
+             @test_skip false
+         else
+-            # Five samples x four taxa: 'ghost' has no reads anywhere, 'rare'
+-            # one read in one sample, 'p' and 'q' are always present.
++            # Six samples x four taxa: 'ghost' has no reads anywhere, 'rare' one
++            # read in one sample, 'p' and 'q' are always present.
+             x = [10 20 0 0; 12 18 0 0; 11 19 3 0; 30 8 0 0; 28 9 0 0; 33 7 0 0]
+-            s = ["s$i" for i in 1:6]
++            sn = ["s$i" for i in 1:6]
+             taxa = ["p", "q", "rare", "ghost"]
+             g = ["A", "A", "A", "B", "B", "B"]
+-            res = differential_abundance(x, s, taxa, g; reference="A", contrast="B",
++            res = differential_abundance(x, sn, taxa, g; reference="A", contrast="B",
+                                          config=DifferentialConfig("tss", 0.5; method="clr_lm"))
+             byt = Dict(r["taxon"] => r for r in res["rows"])
+             @test byt["ghost"]["status"] == "filtered"
+             @test occursin("not part of the composition", byt["ghost"]["note"])
+-            # 'rare' is in the composition (it shapes the CLR of every sample)
+-            # but is below the prevalence threshold, so it is not tested.
+             @test byt["rare"]["status"] == "filtered"
+             @test occursin("min_prevalence", byt["rare"]["note"])
+             @test byt["p"]["status"] == "ok" && byt["q"]["status"] == "ok"
++            # The composition is the two tested taxa, so this table has no zeros
++            # left to impute at all: 'rare' is not filled in just to be thrown
++            # away afterwards.
++            zr = res["diagnostics"]["zero_replacement"]
++            @test zr["n_taxa_in_composition"] == 2 && zr["n_taxa_unobserved"] == 1
++            @test zr["n_taxa_excluded"] == 1
++            @test zr["zeros_replaced"] == 0 && zr["n_samples_replaced"] == 0
++            @test zr["max_imputed_fraction"] == 0.0 && zr["median_imputed_fraction"] == 0.0
++            @test zr["delta"] == DEFAULT_DELTA && zr["threshold"] == DETECTION_THRESHOLD
++            # A two-taxon composition is antisymmetric about the log ratio, which
++            # checks the whole chain without needing R for the arithmetic.
++            @test byt["p"]["estimate"] ≈ -byt["q"]["estimate"] rtol=1e-12
++            @test byt["p"]["estimate"] ≈ 0.94208153004477513 rtol=1e-12
++            @test byt["p"]["pvalue"] ≈ 0.00041107699360433072 rtol=1e-10
++            @test byt["p"]["df"] ≈ 3.5554512470741342 rtol=1e-10
++            # A pooled test on the same numbers would have said 2.084e-04 with 4
++            # degrees of freedom: the estimate is identical, and only the df move,
++            # which is what the reported df are for.
++            pooled = rcopy(R"""
++                local({
++                  v <- $(clr_transform([10.0 20; 12 18; 11 19; 30 8; 28 9; 33 7]))[:, 1]
++                  grp <- c("A", "A", "A", "B", "B", "B")
++                  fit <- stats::t.test(v[grp == "B"], v[grp == "A"], var.equal = TRUE)
++                  c(unname(fit$estimate[1] - fit$estimate[2]), fit$p.value, unname(fit$parameter))
++                })
++            """)
++            @test byt["p"]["estimate"] ≈ pooled[1] rtol=1e-10
++            @test byt["p"]["df"] != pooled[3]
++            @test abs(byt["p"]["pvalue"] - pooled[2]) > 1e-4
++            @test_throws ArgumentError differential_abundance(x[:, [1, 4]], sn, ["p", "ghost"], g;
++                                                              reference="A", contrast="B", config=clr_config)
++            # And what the old order did. Replacing over every observed taxon and
++            # filtering afterwards puts an imputed 3 into a three-read sample,
++            # which moves the geometric mean of every sample: p's estimate comes
++            # out 1.2129 instead of 0.9421, 0.27 CLR units of pure artefact.
++            if HAVE_ZC
++                old = clr_transform(multiplicative_replacement(Float64.(x[:, 1:3])).values)
++                ga = g .== "A"
++                want = sum(old[.!ga, 1]) / 3 - sum(old[ga, 1]) / 3
++                @test want ≈ 1.2128631882349961 rtol=1e-10
++                @test abs(want - byt["p"]["estimate"]) > 0.25
++            else
++                @test_skip true
++            end
++        end
++    end
++
++    @testset "clr_lm on a sparse table: it runs once min_prevalence is raised" begin
++        if !HAVE_R
++            @test_skip false
++        else
++            # Eight samples x twelve taxa, 61 of the 96 cells zero: p and q in
++            # every sample, r and s in seven, t1..t7 in exactly one sample each
++            # (12.5% prevalence) and ghost nowhere. Sample A1 has two reads. This
++            # is the shape from the review: an 18S table, mostly zeros.
++            x = [1 1 0 0 0 0 0 0 0 0 0 0;
++                 20 8 12 10 30 0 0 0 0 0 0 0;
++                 18 6 14 9 0 30 0 0 0 0 0 0;
++                 25 40 10 12 0 0 30 0 0 0 0 0;
++                 22 45 11 13 0 0 0 30 0 0 0 0;
++                 21 52 9 11 0 0 0 0 32 0 0 0;
++                 19 61 0 10 0 0 0 0 0 32 0 0;
++                 23 33 12 0 0 0 0 0 0 0 32 0]
++            sn = ["A1", "A2", "A3", "B1", "B2", "B3", "B4", "B5"]
++            taxa = ["p", "q", "r", "s", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "ghost"]
++            g = ["A", "A", "A", "B", "B", "B", "B", "B"]
++            cfg(mp) = DifferentialConfig("tss", mp; method="clr_lm")
++
++            # One taxon left is not a composition: the refusal says so before any
++            # replacement is attempted.
++            e = try
++                differential_abundance(x[:, [1, 12]], sn, ["p", "ghost"], g;
++                                       reference="A", contrast="B", config=cfg(0.5))
++                nothing
++            catch err
++                err
++            end
++            @test e isa ArgumentError
++            @test occursin("at least 2 taxa with reads at or above analysis.differential.min_prevalence", e.msg)
++
++            # At 0.0 and at 0.125 the eleven taxa with reads all go into the
++            # composition, A1's nine zeros want 123.8% of its two reads, and the
++            # analysis stops with the reason instead of returning a composition of
++            # imputed values. 0.25 leaves the four taxa the test would report on
++            # and runs.
++            for mp in (0.0, 0.125)
++                e = try
++                    differential_abundance(x, sn, taxa, g; reference="A", contrast="B", config=cfg(mp))
++                    nothing
++                catch err
++                    err
++                end
++                @test e isa ArgumentError
++                msg = sprint(showerror, e)
++                @test occursin("sample 'A1' has 9 zeros", msg)
++                @test occursin("would hold 123.8% of its total", msg)
++                @test occursin("The largest delta that can still work is below 0.526", msg)
++                @test occursin("Raise analysis.differential.min_prevalence", msg)
++                @test occursin("lower analysis.differential.replacement_delta", msg)
++            end
++            res = differential_abundance(x, sn, taxa, g; reference="A", contrast="B", config=cfg(0.25))
++            byt = Dict(r["taxon"] => r for r in res["rows"])
++            @test res["status"] == "ok" && res["config"]["min_prevalence"] == 0.25
++            @test res["n_samples"] == Dict("A" => 3, "B" => 5)
++            for t in ("p", "q", "r", "s")
++                @test byt[t]["status"] == "ok" && !isnothing(byt[t]["padj"])
++            end
++            for t in ("t1", "t2", "t3", "t4", "t5", "t6", "t7")
++                @test byt[t]["status"] == "filtered" && isnothing(byt[t]["pvalue"])
++                @test occursin("min_prevalence = 0.25", byt[t]["note"])
++            end
++            @test byt["ghost"]["status"] == "filtered"
++            @test occursin("no reads in any sample", byt["ghost"]["note"])
+             zr = res["diagnostics"]["zero_replacement"]
+-            @test zr["n_taxa_in_composition"] == 3 && zr["n_taxa_unobserved"] == 1
+-            @test zr["zeros_replaced"] == 5
+-            @test 0 < zr["max_imputed_fraction"] < 1
+-
+-            # The composition the fit saw includes 'rare', replaced: the estimate
+-            # for 'p' is computed on the 3-taxon CLR, not on p and q alone.
+-            obs = Float64.(x[:, 1:3])
+-            z = clr_transform(MetaManifold.ZeroReplacement.multiplicative_replacement(obs).counts)
+-            a = g .== "A"
+-            want = sum(z[.!a, 1]) / 3 - sum(z[a, 1]) / 3
+-            @test byt["p"]["estimate"] ≈ want rtol=1e-8
+-
+-            @test_throws ArgumentError differential_abundance(x[:, [1, 4]], s, ["p", "ghost"], g;
+-                reference="A", contrast="B", config=clr_config)
++            @test zr["zeros_replaced"] == 4 && zr["n_samples_replaced"] == 3
++            @test zr["n_taxa_in_composition"] == 4
++            @test zr["n_taxa_excluded"] == 7 && zr["n_taxa_unobserved"] == 1
++            @test zr["max_imputed_fraction"] ≈ 0.13512544802867382 rtol=1e-12
++            @test zr["median_imputed_fraction"] == 0.0
++            @test res["diagnostics"]["n_tested"] == 4
++            # The estimates Welch's test then reports, and the fact that they are
++            # Welch's: for q the pooled test would have found significance and the
++            # unequal-variance one does not, which is the whole reason for the
++            # switch (3 against 5 samples, so the smaller group's spread is not
++            # borrowed from the larger).
++            @test byt["p"]["estimate"] ≈ -0.13896598050606401 rtol=1e-10
++            @test byt["q"]["estimate"] ≈ 1.25662699508668 rtol=1e-10
++            @test byt["r"]["estimate"] ≈ -0.6767209693445847 rtol=1e-10
++            @test byt["s"]["estimate"] ≈ -0.44094004523603109 rtol=1e-10
++            @test byt["q"]["pvalue"] ≈ 0.098203625579598358 rtol=1e-10
++            @test byt["q"]["pvalue"] > 0.05 && byt["q"]["padj"] > 0.3
++            @test byt["q"]["df"] ≈ 3.0413580844458199 rtol=1e-10
++            @test byt["q"]["df"] < 6
++            @test abs(byt["q"]["pvalue"] - 0.037278838082443477) > 0.05
++            @test all(0 <= byt[t]["pvalue"] <= 1 for t in ("p", "q", "r", "s"))
++
++            if !HAVE_ZC
++                @test_skip true
++            else
++                # The same eight-by-four composition, rebuilt with cmultRepl from
++                # the counts, and the same four Welch tests done directly.
++                direct = rcopy(R"""
++                  local({
++                    x <- matrix(c(1, 1, 0, 0,
++                                  20, 8, 12, 10,
++                                  18, 6, 14, 9,
++                                  25, 40, 10, 12,
++                                  22, 45, 11, 13,
++                                  21, 52, 9, 11,
++                                  19, 61, 0, 10,
++                                  23, 33, 12, 0), nrow = 8, ncol = 4, byrow = TRUE)
++                    y <- as.matrix(cmultRepl(as.data.frame(x), label = 0, method = "CZM",
++                                             output = "prop", frac = 0.65, threshold = 0.5,
++                                             adjust = TRUE, z.warning = 1, z.delete = FALSE,
++                                             suppress.print = TRUE))
++                    z <- sweep(log(y), 1, rowMeans(log(y)), "-")
++                    grp <- factor(c("A", "A", "A", "B", "B", "B", "B", "B"), levels = c("A", "B"))
++                    est <- numeric(4); pv <- numeric(4); dfv <- numeric(4); pm <- numeric(4)
++                    for (j in 1:4) {
++                      fit <- stats::t.test(z[, j][grp == "B"], z[, j][grp == "A"], var.equal = FALSE)
++                      est[j] <- unname(fit$estimate[1] - fit$estimate[2])
++                      pv[j] <- fit$p.value
++                      dfv[j] <- unname(fit$parameter)
++                      pm[j] <- stats::t.test(z[, j][grp == "B"], z[, j][grp == "A"],
++                                             var.equal = TRUE)$p.value
++                    }
++                    list(z = z, est = est, p = pv, df = dfv, pooled = pm,
++                         mass = rowSums(cbind(ifelse(x == 0, y, 0))))
++                  })
++                """)
++                z = direct["z"]                        # samples x taxa, as in R
++                clr_here = clr_transform(multiplicative_replacement(x[:, 1:4]).values)
++                @test clr_here ≈ z rtol=1e-12
++                for (j, t) in enumerate(("p", "q", "r", "s"))
++                    @test byt[t]["estimate"] ≈ direct["est"][j] rtol=1e-10
++                    @test byt[t]["pvalue"] ≈ direct["p"][j] rtol=1e-8
++                    @test byt[t]["df"] ≈ direct["df"][j] rtol=1e-9
++                    @test abs(byt[t]["pvalue"] - direct["pooled"][j]) > 1e-3
++                end
++                @test maximum(direct["mass"]) ≈ 0.13512544802867382 rtol=1e-12
++                @test count(>(0), direct["mass"]) == 3
++                # The BH family is the four tested taxa, and only they are
++                # adjusted: the filtered ones carry no p-value to adjust.
++                p4 = [byt[t]["pvalue"] for t in ("p", "q", "r", "s")]
++                @test byt["q"]["padj"] ≈ bh_adjust(p4)[2] rtol=1e-12
++                @test all(isnothing(byt[t]["padj"]) for t in ("t1", "ghost"))
++            end
++        end
++    end
++
++    @testset "fit_welch reports a reason instead of a stand-in p-value" begin
++        if !HAVE_R
++            @test_skip false
++        else
++            v = [1.0 2.0; 1.0 2.0; 3.0 1.0; 4.0 0.5]
++            out = fit_welch(v, ["A", "A", "B", "B"]; levels=("A", "B"))
++            @test out.status == ["ok", "ok"]
++            @test out.note == ["", ""]
++            # Both groups hold one distinct value each: Welch has no variance to
++            # work with, and that is said out loud rather than returned as t = 0.
++            degenerate = fit_welch([1.0 1.0; 1.0 5.0; 2.0 3.0; 2.0 9.0],
++                                   ["A", "A", "B", "B"]; levels=("A", "B"))
++            @test degenerate.status == ["failed", "ok"]
++            @test degenerate.note[1] == "each group has one distinct value, so no variance can be estimated"
++            @test all(isnothing.(degenerate[1, [:estimate, :se, :statistic, :pvalue, :df]]))
++            # A column that is constant across every sample cannot be fitted
++            # either, and says so.
++            constant = fit_welch([2.0 1.0; 2.0 3.0; 2.0 5.0; 2.0 2.0],
++                                 ["A", "A", "B", "B"]; levels=("A", "B"))
++            @test constant.status[1] == "failed"
++            @test occursin("constant across samples", constant.note[1])
++            # One sample in a group is not enough for a variance, and the guard
++            # above does not cover it (the other group has two distinct values):
++            # whatever R stops with is carried into the note, not swallowed.
++            single = fit_welch([1.0; 3.0; 5.0], ["A", "A", "B"]; levels=("A", "B"))
++            @test single.status[1] == "failed" && !isempty(single.note[1])
++            @test occursin("not enough 'x' observations", single.note[1])
++            # Two samples in one group is enough for a variance, and one is not:
++            # the analysis says so before R is asked, rather than reporting a
++            # taxon as failed for an arithmetic reason.
++            e = try
++                differential_abundance([10 20 5; 12 18 7; 30 8 4], ["a", "b", "c"],
++                                       ["p", "q", "r"], ["A", "A", "B"];
++                                       reference="A", contrast="B", config=clr_config)
++                nothing
++            catch err
++                err
++            end
++            @test e isa ArgumentError
++            @test occursin("at least 2 samples per group", sprint(showerror, e))
+         end
+     end
+ 
+diff --git a/test/unit/test_zero_replacement.jl b/test/unit/test_zero_replacement.jl
+index 4215312..133ffb8 100644
+--- a/test/unit/test_zero_replacement.jl
++++ b/test/unit/test_zero_replacement.jl
+@@ -1,78 +1,227 @@
+ # SPDX-License-Identifier: AGPL-3.0-only
+ # SPDX-FileCopyrightText: 2026 Jonathan D.A. Jewell (hyperpolymath) <j.d.a.jewell@open.ac.uk>
+ #
+-# Multiplicative zero replacement: a hand-computed known answer, the
+-# invariants (totals kept, observed ratios kept, no zero left), every refusal,
+-# and a control showing the invariant check can fail. Pure Julia; no R needed.
++# Multiplicative zero replacement, which is `zCompositions::cmultRepl` called
++# through RCall. Three things are checked: that the wrapper refuses what it must
++# refuse before R is asked for anything; that what it returns is what the
++# package itself computes, on three tables and at three deltas; and that the
++# invariant predicate that guards R's output really can fail. The R-dependent
++# testsets skip loudly when the package is not in the project library: a
++# replacement left unchecked against its own reference implementation is how a
++# reimplementation drifts, which is the thing this file replaced.
+ 
+ using MetaManifold
+ using MetaManifold.ZeroReplacement
+-using Test
++using RCall, Test
++
++# Can the embedded R session load cmultRepl? Probed once, because a checkout
++# without R installed should skip these rather than fail them.
++const HAVE_ZC = try
++    RCall.rcopy(RCall.reval("requireNamespace('zCompositions', quietly = TRUE)"))
++catch
++    false
++end
+ 
+ @testset "Zero replacement" begin
+ 
+-    @testset "Known answer, computed by hand" begin
+-        # Detection limits: taxon 1 -> 4, taxon 2 -> 2, taxon 3 -> 6. With
+-        # delta = 0.5, sample 1 replaces one zero worth 0.5*4 = 2 of a total of
+-        # 10 (Δ = 0.2) and sample 2 one worth 0.5*2 = 1 (Δ = 0.1).
++    @testset "Refusals that need no R" begin
+         x = [0 2 8; 4 0 6]
+-        out = multiplicative_replacement(x; delta=0.5)
+-        @test out.counts ≈ [2.0 1.6 6.4; 3.6 1.0 5.4]
+-        @test out.detection_limits == [4.0, 2.0, 6.0]
+-        @test out.zeros_replaced == 2
+-        @test out.imputed_mass ≈ [0.2, 0.1]
+-        @test out.delta == 0.5
++        for d in (0, 1, -0.5, 1.5, NaN, Inf)
++            @test_throws ArgumentError multiplicative_replacement(x; delta=d)
++        end
++        for t in (0.0, -1.0, 1.5)
++            @test_throws ArgumentError multiplicative_replacement(x; threshold=t)
++        end
++        # Counts, not proportions and not anything in between.
++        @test_throws ArgumentError multiplicative_replacement([1.5 2; 3 4])
++        @test_throws ArgumentError multiplicative_replacement([-1 2; 3 4])
++        @test_throws ArgumentError multiplicative_replacement([Inf 2; 3 4])
++        @test_throws ArgumentError multiplicative_replacement([NaN 2; 3 4])
++        # A replacement is scaled against what the other samples show, so one
++        # sample is not a table. cmultRepl's own first requirement is the same.
++        @test_throws ArgumentError multiplicative_replacement([0 2 8])
++        # A taxon never observed has no observed proportion to cap a replacement.
++        @test_throws ArgumentError multiplicative_replacement([0 2; 0 4]; taxa=["ghost", "real"])
++        # A sample with no reads has no total for a fraction to be of.
++        @test_throws ArgumentError multiplicative_replacement([0 0; 1 1])
++        @test_throws ArgumentError multiplicative_replacement(x; samples=["a"], taxa=["p", "q", "r"])
++        @test_throws ArgumentError multiplicative_replacement(x; samples=["a", "b"], taxa=["p", "q"])
+     end
+ 
+-    @testset "Invariants on a larger table" begin
+-        x = [0 3 0 12 5; 7 0 1 0 9; 2 2 2 2 2; 0 0 4 30 1]
+-        out = multiplicative_replacement(x)
+-        @test replacement_invariants_hold(x, out.counts)
+-        @test vec(sum(out.counts; dims=2)) ≈ vec(sum(x; dims=2))
+-        @test all(>(0), out.counts)
+-        # Every replaced value is below its taxon's detection limit.
+-        for i in axes(x, 1), j in axes(x, 2)
+-            x[i, j] == 0 && @test out.counts[i, j] < out.detection_limits[j]
++    @testset "An impossible replacement is refused with numbers" begin
++        # `shallow` has one read and four zeros. Its own limit per zero is
++        # 0.5/1 = 0.5 of the total, and none of the four caps bind (the taxa are
++        # observed at 0.6, 0.4, 0.6 and 0.4 elsewhere, all above 0.65 * 0.5), so
++        # the four replacements want 4 * 0.325 = 130% of a sample that has 70%
++        # left over. cmultRepl computes that and reports nothing: the observed
++        # entry goes negative. The bound is delta / mass = 0.5, and at 0.5 the
++        # row sums to exactly 1, which is why it reads "below".
++        x = [0 0 0 0 1; 6 4 0 0 0; 0 0 6 4 0]
++        e = try
++            multiplicative_replacement(x; samples=["shallow", "a", "b"])
++            nothing
++        catch err
++            err
+         end
+-        # A sample without zeros is returned unchanged.
+-        @test out.counts[3, :] == Float64.(x[3, :])
+-        @test out.imputed_mass[3] == 0.0
+-        @test out.zeros_replaced == 6
++        @test e isa ArgumentError
++        msg = sprint(showerror, e)
++        @test occursin("sample 'shallow' has 4 zeros", msg)
++        @test occursin("at delta = 0.65 would hold 130.0% of its total", msg)
++        @test occursin("leaving nothing for the taxa it does have", msg)
++        @test occursin("The largest delta that can still work is below 0.5", msg)
++        @test occursin("Raise analysis.differential.min_prevalence", msg)
++        @test occursin("lower analysis.differential.replacement_delta", msg)
++        # The boundary itself: at delta = 0.5 the replacements are the sample.
++        @test_throws ArgumentError multiplicative_replacement(x; samples=["shallow", "a", "b"],
++                                                             delta=0.5)
+     end
+ 
+-    @testset "The invariant check can fail (control)" begin
+-        x = [0 2 8; 4 0 6]
+-        good = multiplicative_replacement(x; delta=0.5).counts
+-        bad_total = copy(good); bad_total[1, 1] += 1
+-        @test !replacement_invariants_hold(x, bad_total)
+-        bad_ratio = copy(good); bad_ratio[1, 2] += 0.1; bad_ratio[1, 3] -= 0.1
+-        @test !replacement_invariants_hold(x, bad_ratio)
+-        @test !replacement_invariants_hold(x, Float64.(x))
+-        @test !replacement_invariants_hold(x, good[:, 1:2])
++    @testset "A table with no zeros is returned closed, without R" begin
++        # label = 0 makes cmultRepl refuse a table with no zero in it ("Label 0
++        # was not found in the data set"), so the wrapper does not call it. This
++        # is the path the `effect` fixture takes in differential_abundance.
++        x = [2 8; 4 6]
++        out = multiplicative_replacement(x)
++        @test out.values ≈ [0.2 0.8; 0.4 0.6] rtol=1e-15
++        @test vec(sum(out.values; dims=2)) ≈ ones(2) rtol=1e-15
++        @test out.zeros_replaced == 0
++        @test out.imputed_mass == [0.0, 0.0]
++        @test out.delta == DEFAULT_DELTA
++        @test out.threshold == DETECTION_THRESHOLD
++        @test REPLACEMENT_METHOD == "zCompositions::cmultRepl"
+     end
+ 
+-    @testset "Refusals" begin
+-        x = [0 2 8; 4 0 6]
+-        for d in (0, 1, -0.5, 1.5, NaN)
+-            @test_throws ArgumentError multiplicative_replacement(x; delta=d)
++    @testset "cmultRepl parity: three tables, three deltas" begin
++        if !HAVE_ZC
++            @test_skip true
++        else
++            # The wrapper is a thin shell, so it is checked against the package
++            # rather than against arithmetic copied out of it.
++            tables = [
++                ([0 2 8; 4 0 6], 2),
++                ([1 1 0 0; 20 8 12 10; 18 6 14 9; 25 40 10 12;
++                  22 45 11 13; 21 52 9 11; 19 61 0 10; 23 33 12 0], 4),
++                ([1 0 3; 0 5 2; 4 2 0; 2 3 1], 3),
++            ]
++            for (x, _) in tables, delta in (0.05, 0.65, 0.99)
++                out = multiplicative_replacement(x; delta).values
++                direct = rcopy(R"""
++                    local({
++                      x <- matrix(as.numeric($x), nrow = $(size(x, 1)), byrow = TRUE)
++                      as.matrix(cmultRepl(as.data.frame(x), label = 0, method = "CZM",
++                                          output = "prop", frac = $(delta), threshold = 0.5,
++                                          adjust = TRUE, z.warning = 1, z.delete = FALSE,
++                                          suppress.print = TRUE))
++                    })
++                """)
++                @test out ≈ Matrix{Float64}(direct) rtol=1e-12
++            end
+         end
+-        @test_throws ArgumentError multiplicative_replacement([-1 2; 3 4])
+-        @test_throws ArgumentError multiplicative_replacement([Inf 2; 3 4])
+-        @test_throws ArgumentError multiplicative_replacement([0 2; 0 4])
+-        @test_throws ArgumentError multiplicative_replacement([0 0; 3 4])
+-        @test_throws ArgumentError multiplicative_replacement(x; samples=["a"], taxa=["p", "q", "r"])
++    end
+ 
+-        msg = try
+-            multiplicative_replacement([0 0 1; 50 50 1]; samples=["s1", "s2"], taxa=["p", "q", "r"])
+-            ""
+-        catch e
+-            e.msg
++    @testset "What the kept sparse composition becomes" begin
++        if !HAVE_ZC
++            @test_skip true
++        else
++            # The eight samples of the differential fixture with only the four
++            # taxa a 25% prevalence filter leaves. Hand-computed from the
++            # package's rule: 'A1' has 2 reads, so its limit per zero is 0.25 of
++            # its total; r is seen as low as 9/93 (in 'B3') and s as low as 10/90
++            # (in 'B4'), both below the uncapped 0.65 * 0.25 = 0.1625, so both are
++            # capped at 0.65 * (9/93) and 0.65 * (10/90), and p and q keep what is
++            # left of the half each had. The five samples with no zero in them are
++            # returned as their own proportions, untouched.
++            x = [1 1 0 0; 20 8 12 10; 18 6 14 9; 25 40 10 12;
++                 22 45 11 13; 21 52 9 11; 19 61 0 10; 23 33 12 0]
++            out = multiplicative_replacement(x; samples=["A1", "A2", "A3", "B1", "B2", "B3",
++                                                         "B4", "B5"], taxa=["p", "q", "r", "s"])
++            @test out.values ≈ [0.43243727598566306 0.43243727598566306 0.062903225806451607 0.072222222222222215
++                                0.4 0.16 0.24 0.2
++                                0.38297872340425532 0.1276595744680851 0.2978723404255319 0.19148936170212766
++                                0.28735632183908044 0.45977011494252873 0.11494252873563218 0.13793103448275862
++                                0.24175824175824176 0.49450549450549453 0.12087912087912088 0.14285714285714285
++                                0.22580645161290322 0.55913978494623651 0.096774193548387094 0.11827956989247312
++                                0.21034876543209877 0.67533024691358023 0.0036111111111111114 0.11070987654320986
++                                0.33661872837370244 0.48297469723183389 0.1756271626297578 0.0047794117647058827] rtol=1e-12
++            @test out.values[1, 3] ≈ 0.65 * 9 / 93 rtol=1e-12
++            @test out.values[1, 4] ≈ 0.65 * 10 / 90 rtol=1e-12
++            @test out.values[7, 3] ≈ 0.65 * 0.5 / 90 rtol=1e-12
++            @test out.values[8, 4] ≈ 0.65 * 0.5 / 68 rtol=1e-12
++            @test vec(sum(out.values; dims=2)) ≈ ones(8) rtol=1e-14
++            @test all(>(0), out.values)
++            @test out.zeros_replaced == 4
++            @test out.imputed_mass ≈ [0.13512544802867382, 0, 0, 0, 0, 0,
++                                      0.0036111111111111114, 0.0047794117647058827] rtol=1e-14
++            @test count(>(0), out.imputed_mass) == 3
++            # A sample with no zeros keeps its observed ratios exactly, and a
++            # replaced value never exceeds frac of the taxon's smallest share.
++            @test out.values[2, :] ≈ [0.4, 0.16, 0.24, 0.2] rtol=1e-15
++            for i in 1:8
++                seen = findall(>(0), view(x, i, :))
++                length(seen) >= 2 || continue
++                r = [out.values[i, j] / (x[i, j] / sum(x[i, :])) for j in seen]
++                @test all(isapprox.(r, r[1]; rtol=1e-12))
++            end
++            # One zero, in a sample of four reads: the row's own limit is 0.5/4,
++            # below q's smallest observed proportion (0.8), so it is not capped.
++            @test multiplicative_replacement([2 8; 4 0]).values ≈
++                  [0.2 0.8; 0.91875000000000004 0.081250000000000003] rtol=1e-14
+         end
+-        # Sample s1: limits 50 + 50 against a total of 1, so delta must stay below 0.01.
+-        @test occursin("'s1'", msg)
+-        @test occursin("below 0.01", msg)
++    end
+ 
+-        msg = try multiplicative_replacement([0 2; 0 4]; taxa=["ghost", "real"]); "" catch e; e.msg end
+-        @test occursin("'ghost'", msg)
++    @testset "The package itself does not refuse an impossible one" begin
++        if !HAVE_ZC
++            @test_skip true
++        else
++            # The check above is not decoration. On the unfiltered version of
++            # that fixture - eleven taxa, so 'A1' has nine zeros - cmultRepl
++            # computes a replacement larger than the sample and reports nothing:
++            # the observed entries go negative and the row still sums to 1, which
++            # the CLR would turn into a NaN or a complex number.
++            x = [1 1 0 0 0 0 0 0 0 0 0; 20 8 12 10 30 0 0 0 0 0 0;
++                 18 6 14 9 0 30 0 0 0 0 0; 25 40 10 12 0 0 30 0 0 0 0;
++                 22 45 11 13 0 0 0 30 0 0 0; 21 52 9 11 0 0 0 0 32 0 0;
++                 19 61 0 10 0 0 0 0 0 32 0; 23 33 12 0 0 0 0 0 0 0 32]
++            @test_throws ArgumentError multiplicative_replacement(x)
++            first_row = rcopy(R"""
++                local({
++                  x <- matrix(as.numeric($x), nrow = 8, ncol = 11, byrow = TRUE)
++                  y <- as.matrix(cmultRepl(as.data.frame(x), label = 0, method = "CZM",
++                                           output = "prop", frac = 0.65, threshold = 0.5,
++                                           adjust = TRUE, z.warning = 1, z.delete = FALSE,
++                                           suppress.print = TRUE))
++                  c(y[1, 1], y[1, 2], sum(y[1, 1:2]), sum(y[1, ]))
++                })
++            """)
++            @test first_row[1] < 0 && first_row[2] < 0        # the two reads it had
++            @test abs(first_row[3] + 0.23757868852459) < 1e-9  # 1 - 1.2376, times 0.5
++            @test first_row[4] ≈ 1.0 rtol=1e-12                # and it sums to one
++        end
++    end
++
++    @testset "The invariant check can fail (controls)" begin
++        # Each of these is a table a weaker check would let through, so the
++        # predicate that guards the wrapper's output has to reject them. `good`
++        # is the hand-computed answer for the same input, so the first assertion
++        # is a check of the predicate too: it must accept a correct replacement.
++        closed = [0.0 0.2 0.8; 0.4 0.0 0.6]
++        good = [0.0325 0.1935 0.774; 0.387 0.0325 0.5805]
++        @test replacement_invariants_hold(closed, good)
++        over = copy(good); over[1, 1] += 1e-3
++        @test !replacement_invariants_hold(closed, over)                       # total moved
++        off = copy(good); off[1, 1] += 1e-3; off[1, 3] -= 1e-3
++        @test !replacement_invariants_hold(closed, off)                        # ratios moved
++        single = copy(good); single[1, 1] = 0.0
++        @test !replacement_invariants_hold(closed, single)                     # a zero left
++        left = copy(good); left[2, 3] /= 2
++        @test !replacement_invariants_hold(closed, left)                       # observed unscaled
++        @test !replacement_invariants_hold(closed, good[:, 1:2])                # a taxon dropped
++        @test !replacement_invariants_hold(Matrix(closed'), Matrix(good'))      # transposed
++        @test !replacement_invariants_hold([0.0 0.0; 0.5 0.5], [0.0 0.0; 0.5 0.5])  # no reads
++        # ... and to accept the real thing once R has produced it.
++        if HAVE_ZC
++            @test replacement_invariants_hold([0 2 8; 4 0 6] ./ [10.0, 10.0],
++                                              multiplicative_replacement([0 2 8; 4 0 6]).values)
++        end
+     end
+ end
+-- 
+2.39.5
+
